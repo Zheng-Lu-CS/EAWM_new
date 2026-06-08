@@ -1,0 +1,233 @@
+# Codex 任务：为 EAWM / EASimulus / Atari 100k 复现补齐环境配置与一键运行脚本
+
+你现在在 EAWM 官方代码库的本地副本中工作。请只围绕 **EASimulus + Atari 100k** 做工程化配置；暂时不考虑 EADream、DMC、Craftax、DMC-GB2、可视化评测视频。
+
+## 背景与目标
+
+我要把本地代码同步到云端路径：
+
+```bash
+/data/share/hxd/zhenglu/eawm
+```
+
+官方仓库结构中应包含：
+
+```bash
+EASimulus/
+  README.md
+  requirements.txt
+  get_lpips.py
+  src/main.py
+  config/
+  scripts/train_atari.sh
+```
+
+云端 conda 环境名固定为：
+
+```bash
+zhenglu_easimulus
+```
+
+配置环境时云端只有 1 张 GPU；环境配置成功之后，我会提交到算力池，让任务拿到 4 张 H100，然后 4 个 Atari 任务并行训练：每组实验独占一张 H100。
+
+训练任务：
+
+```text
+BreakoutNoFrameskip-v4
+BoxingNoFrameskip-v4
+SeaquestNoFrameskip-v4
+RoadRunnerNoFrameskip-v4
+```
+
+要求：
+1. 尽可能严格复现官方 EASimulus Atari 100k 配置，不要改官方训练超参。
+2. 允许为了工程稳定性增加：环境脚本、启动脚本、日志记录、缓存路径、wandb offline/disabled、媒体/视频关闭、系统依赖检查、GPU 检查。
+3. 不要改模型结构、loss、数据采样、训练步数、epochs、evaluation 协议等核心逻辑，除非官方代码在当前依赖下无法启动；如果必须改，只做最小兼容性 patch，并在文件注释和日志中说明。
+4. 云端下载依赖时，能走国内加速就优先走清华源；PyTorch CUDA wheel 按官方 PyTorch index 安装。
+5. 所有终端输出都要写入项目根目录 `/data/share/hxd/zhenglu/eawm/logs/` 下，便于我把 log 发给 ChatGPT 分析。
+6. 暂时不需要记录可视化评测视频；不要为了视频保存产生大量 I/O。
+7. 训练时要高效使用 GPU，并缓解可能的共享文件系统 I/O 瓶颈：缓存放项目 `cache/`，日志集中到 `logs/`，每个任务单独 output dir，避免 4 个进程写同一个目录。
+
+## 已知服务器检查结论
+
+服务器检查报告显示：
+- OS: Ubuntu 24.04.2 LTS，glibc 2.39。
+- GPU: NVIDIA H100 80GB HBM3，但当前配置环境节点暴露的是 MIG 3g.40gb，driver 550.90.07，CUDA runtime 12.9；torch CUDA smoke 通过。
+- 当前不是 Slurm job，且 Slurm 命令不可见；后续算力池作业不一定依赖 Slurm。
+- 缺失或未安装的系统依赖包括：`ffmpeg`、`libsm6`、`libGL`、`libEGL`、`libOSMesa`、`libGLEW`、`xvfb`、`mesa-utils` 等。
+- Hugging Face checkpoint repo 网络不可达；但本阶段是从头训练 EASimulus Atari，不依赖下载预训练 checkpoint。
+- Atari ROM host 可达，LPIPS/VGG 权重 host 可达，PyPI/PyTorch wheel index 可达。
+- 官方 EASimulus README：Python 3.10；torch/torchvision 需单独装，代码按 torch==2.5.1 开发；然后 `pip install -r requirements.txt`；再运行 `python get_lpips.py`；Atari 训练入口是 `python src/main.py benchmark=atari env.train.id=BreakoutNoFrameskip-v4 ...`。
+- 官方 EASimulus `requirements.txt` 包含：
+  `einops==0.8.0 gymnasium[atari]==1.0.0a2 ale-py==0.9.1 hydra-core==1.3.2 opencv-python==4.7.0.72 protobuf==3.20.* psutil==5.8.0 pygame>=2.1.2 tqdm>=4.62.3 wandb>=0.15.9 nltk==3.8.1 loguru yet-another-retnet>=0.5.0 numpy==1.24.2 rliable dm_control==1.0.19 dm-env==1.6 mujoco==3.1.5 mujoco-utils==0.0.6 imageio[ffmpeg]`
+- 官方 `scripts/train_atari.sh` 使用：
+  `tokenizer.image.with_lpips=True benchmark=atari env.train.id=${env}NoFrameskip-v4 common.seed=${seed} world_model.event_pred=True world_model.ges=True`
+- 官方 `config/benchmark/atari.yaml` 中核心 Atari 100k 配置是：
+  `common.epochs=600`
+  `collection.train.stop_after_epochs=500`
+  `collection.train.config.num_steps=200`
+  `evaluation.every=50`
+  因此不要在全量训练脚本中覆盖这些核心值。
+
+## 你需要完成的文件
+
+请在官方仓库根目录下新增下面四个文件：
+
+```bash
+tools/zhenglu/setup_easimulus_atari_env.sh
+tools/zhenglu/run_easimulus_atari_4gpu_smoke.sh
+tools/zhenglu/run_easimulus_atari_4gpu_train.sh
+tools/zhenglu/README_easimulus_atari_repro.md
+```
+
+请不要把这些文件放在 EASimulus 官方源码目录里覆盖官方脚本；可以引用官方脚本，但本任务建议写独立脚本。
+
+## 1. setup_easimulus_atari_env.sh 要求
+
+功能：
+- 从任意位置运行都能定位项目根目录；默认项目根目录是 `/data/share/hxd/zhenglu/eawm`，也允许通过 `PROJECT_ROOT=...` 覆盖。
+- 进入 `$PROJECT_ROOT/EASimulus`。
+- 所有输出写入 `$PROJECT_ROOT/logs/setup_easimulus_atari_<timestamp>.log`。
+- 如果当前用户是 root 且系统是 Ubuntu，则优先把 apt 源切到清华源，并安装系统包：
+  `ffmpeg libsm6 libxext6 libgl1 libegl1 libgl1-mesa-dev libosmesa6 libosmesa6-dev libglew-dev x11-xserver-utils xvfb mesa-utils zip rsync bison flex htop tmux`
+  注意 Ubuntu 24.04 不一定有 `libgl1-mesa-glx`，不要强依赖这个旧包名。
+- 如果不是 root，不要直接失败；打印缺失依赖提示。
+- 创建或复用 conda env `zhenglu_easimulus`，Python 3.10。
+- 配置 pip 使用清华 PyPI：
+  `https://pypi.tuna.tsinghua.edu.cn/simple`
+  但 PyTorch 使用官方 CUDA wheel index。
+- 安装 PyTorch 2.5.1 CUDA 12.4：
+  `torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124`
+  因为服务器 driver 550.90.07 满足 CUDA 12.4 wheel 要求。
+- 安装 EASimulus requirements。
+- 安装 Atari ROM 所需包并导入 ROM：
+  `pip install "autorom[accept-rom-license]"`
+  然后执行 `AutoROM --accept-license`。
+  在脚本里明确提示：运行该命令表示用户确认拥有/接受 Atari ROM 研究使用所需许可。
+- 运行 `python get_lpips.py` 下载 LPIPS/VGG 附加权重到官方默认位置。
+- 设置缓存目录到项目路径：
+  `$PROJECT_ROOT/cache/pip`
+  `$PROJECT_ROOT/cache/torch`
+  `$PROJECT_ROOT/cache/huggingface`
+  `$PROJECT_ROOT/cache/xdg`
+  `$PROJECT_ROOT/cache/matplotlib`
+- 做单卡 smoke import：
+  - import torch / torchvision / gymnasium / ale_py / cv2 / hydra / omegaconf / wandb / numpy / PIL。
+  - torch.cuda.is_available() 应为 True。
+  - 能创建 `BreakoutNoFrameskip-v4`，reset/step 一次。
+  - 能 import `src/main.py` 依赖链的关键模块，或至少运行一个非常小的官方 `python src/main.py ...` smoke 命令。
+- 如果 `BreakoutNoFrameskip-v4` 创建失败但 `ALE/Breakout-v5` 成功，要做最小兼容性处理：优先确认是否需要在 `EASimulus/src/envs/wrappers/atari.py` 中 `import ale_py` 后调用 `gymnasium.register_envs(ale_py)`。只允许做这种注册兼容 patch，不要更换官方 env id 到 v5，因为复现实验应使用官方脚本中的 NoFrameskip-v4 风格。
+- 最后打印如何运行 4 卡 smoke 和全量训练。
+
+## 2. run_easimulus_atari_4gpu_smoke.sh 要求
+
+功能：
+- 从任意位置运行都能定位项目根目录；默认 `/data/share/hxd/zhenglu/eawm`。
+- 激活 `zhenglu_easimulus`。
+- 假设当前任务已经有 4 张 GPU 可见；检查 `torch.cuda.device_count() >= 4`。如果只有 1 卡，要明确报错，因为这是 4 卡 smoke 脚本，不是配置环境脚本。
+- 对四个任务并行启动 4 个进程，每个进程只看一张 GPU：
+  - GPU 0: BreakoutNoFrameskip-v4
+  - GPU 1: BoxingNoFrameskip-v4
+  - GPU 2: SeaquestNoFrameskip-v4
+  - GPU 3: RoadRunnerNoFrameskip-v4
+- 使用官方入口 `python src/main.py`，但用 smoke override 缩短运行：
+  - `common.epochs=3`
+  - `collection.train.stop_after_epochs=3`
+  - `collection.train.config.num_steps=200`
+  - `training.tokenizer.start_after_epochs=0`
+  - `training.tokenizer.steps_per_epoch=1`
+  - `training.world_model.start_after_epochs=1`
+  - `training.world_model.steps_per_epoch=1`
+  - `training.actor_critic.real_start_after_epochs=1`
+  - `training.actor_critic.start_after_epochs=2`
+  - `training.actor_critic.steps_per_epoch=1`
+  - `evaluation.every=1`
+  - `collection.test.config.num_episodes=1`
+  - `collection.test.config.num_episodes_end=1`
+  - `env.test.max_episode_steps=1000`
+  - `common.do_checkpoint=False`
+  - `wandb.mode=disabled`
+- 关闭媒体/可视化输出：如果 Hydra 能解析，设置
+  `collection.train.num_episodes_to_save=0`
+  `collection.test.num_episodes_to_save=0`
+  `evaluation.tokenizer.save_reconstructions=False`
+  如果 0 导致官方代码异常，则退回为 1，但要在 README 中说明。
+- 每个进程日志写入：
+  `$PROJECT_ROOT/logs/smoke_easimulus_atari_<game>_<timestamp>.log`
+- 等待四个进程结束；任一失败则主脚本 exit 非 0，并打印失败 log 路径。
+- 设置：
+  `PYTHONUNBUFFERED=1`
+  `HYDRA_FULL_ERROR=1`
+  `WANDB_MODE=disabled`
+  `OMP_NUM_THREADS=8`
+  `MKL_NUM_THREADS=8`
+  `OPENBLAS_NUM_THREADS=8`
+  `NUMEXPR_NUM_THREADS=8`
+
+## 3. run_easimulus_atari_4gpu_train.sh 要求
+
+功能：
+- 和 smoke 脚本一样定位项目、激活环境、检查 4 GPU。
+- 并行启动四个全量训练进程，每个任务独占一张 GPU：
+  - GPU 0: BreakoutNoFrameskip-v4
+  - GPU 1: BoxingNoFrameskip-v4
+  - GPU 2: SeaquestNoFrameskip-v4
+  - GPU 3: RoadRunnerNoFrameskip-v4
+- 使用官方入口和官方核心超参。不要覆盖：
+  - `common.epochs`
+  - `collection.train.stop_after_epochs`
+  - `collection.train.config.num_steps`
+  - `training.*.steps_per_epoch`
+  - `evaluation.every`
+  - world model / actor critic 结构参数
+- 必须使用官方 EASimulus 开关：
+  `tokenizer.image.with_lpips=True`
+  `benchmark=atari`
+  `world_model.event_pred=True`
+  `world_model.ges=True`
+- `wandb.mode` 默认 `offline`，允许用户用环境变量覆盖：
+  `WANDB_MODE=online bash tools/zhenglu/run_easimulus_atari_4gpu_train.sh`
+- seed 默认 0，允许 `SEED=1` 覆盖。
+- 输出目录放到：
+  `$PROJECT_ROOT/outputs/easimulus_atari_4gpu_<timestamp>/`
+- 每个进程日志写入：
+  `$PROJECT_ROOT/logs/train_easimulus_atari_<game>_seed<seed>_<timestamp>.log`
+- 为缓解 I/O：
+  - cache 全部放 `$PROJECT_ROOT/cache`
+  - 4 个任务 output dir 不能相同
+  - 默认不保存媒体/可视化：
+    `collection.train.num_episodes_to_save=0`
+    `collection.test.num_episodes_to_save=0`
+    `evaluation.tokenizer.save_reconstructions=False`
+    如果 0 不兼容，退回为 1。
+- 保留 checkpoint，不能关闭 `common.do_checkpoint`，因为全量训练需要可恢复。
+- 进程失败时主脚本 exit 非 0，并汇总失败任务和 log 路径。
+
+## 4. README_easimulus_atari_repro.md 要求
+
+写清楚：
+- 云端一键配置：
+  `bash tools/zhenglu/setup_easimulus_atari_env.sh`
+- 4 卡 smoke：
+  `bash tools/zhenglu/run_easimulus_atari_4gpu_smoke.sh`
+- 4 卡全量训练：
+  `bash tools/zhenglu/run_easimulus_atari_4gpu_train.sh`
+- 配置节点只有 1 GPU 是正常的；4 卡脚本必须在 4 GPU 算力池任务里运行。
+- 日志在哪里。
+- 如何查看每个任务 log。
+- 如果 `NoFrameskip-v4` 创建失败，检查 ROM 安装与 ale_py 注册。
+- 如果 `libGL.so.1` / `libSM.so.6` 缺失，说明系统包没装完整。
+- 如果 Hugging Face 不通，不影响当前从头训练。
+- 不要改官方核心超参；需要对照官方 `EASimulus/config/benchmark/atari.yaml`。
+
+## 代码质量要求
+
+- 所有 bash 脚本使用 `set -Eeuo pipefail`。
+- 所有脚本都要打印：hostname、date、pwd、conda env、CUDA_VISIBLE_DEVICES、nvidia-smi 简要信息、python/torch 版本。
+- 所有脚本都支持 `PROJECT_ROOT`、`ENV_NAME` 环境变量覆盖。
+- 不要硬编码用户 home 目录。
+- 避免把大缓存写到 `/root`。
+- 不要在训练脚本里 `git pull`。
+- 不要自动删除已有 outputs/checkpoints/logs。
+- 不要把 wandb API key 写入文件。
+- 生成完后，给出每个脚本的运行命令和你做过的静态检查结果。
