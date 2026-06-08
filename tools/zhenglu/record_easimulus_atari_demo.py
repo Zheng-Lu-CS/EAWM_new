@@ -88,13 +88,16 @@ def main() -> None:
     print(f"[demo] cfg.env.test.id={cfg.env.test.id}")
     print(f"[demo] cfg.common.device={cfg.common.device}")
     print(f"[demo] lpips={cfg.tokenizer.image.vgg_lpips_ckpt_path}")
+    print("[demo] loading checkpoint fields: tokenizer=True, world_model=False, actor_critic=True")
 
     env_partial = instantiate(cfg.env.test)
     env_fn = lambda: env_partial(tokenizer_config=cfg.tokenizer)
     test_env = SingleProcessEnv(env_fn)
     device = torch.device(cfg.common.device)
     agent = build_agent(test_env, cfg, device)
-    agent.load(checkpoint, device)
+    # Official EASimulus Atari demo checkpoints contain tokenizer + actor_critic
+    # weights for agent-in-env playback, but do not include world_model weights.
+    agent.load(checkpoint, device, load_tokenizer=True, load_world_model=False, load_actor_critic=True)
     agent.eval()
 
     demo_env = AgentEnv(agent, test_env, cfg.env.keymap, do_reconstruction=False)
