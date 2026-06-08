@@ -5,6 +5,7 @@ PROJECT_ROOT="${PROJECT_ROOT:-/data/share/hxd/zhenglu/eawm}"
 ENV_NAME="${ENV_NAME:-zhenglu_easimulus}"
 SEED="${SEED:-0}"
 WANDB_MODE="${WANDB_MODE:-offline}"
+HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-60}"
 EASIMULUS_DIR="${PROJECT_ROOT}/EASimulus"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 LOG_DIR="${PROJECT_ROOT}/logs"
@@ -31,6 +32,44 @@ export MKL_NUM_THREADS="${MKL_NUM_THREADS:-8}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-8}"
 export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-8}"
 
+declare -a PIDS=()
+declare -a NAMES=()
+declare -a LOGS=()
+declare -a STATUS=()
+
+print_child_status() {
+  local i
+  local running_jobs
+  running_jobs="$(jobs -pr || true)"
+  for i in "${!PIDS[@]}"; do
+    if [[ "${STATUS[$i]:-running}" == "running" ]] && grep -qx "${PIDS[$i]}" <<< "${running_jobs}"; then
+      echo "[train][status] running name=${NAMES[$i]} pid=${PIDS[$i]} log=${LOGS[$i]}"
+    else
+      echo "[train][status] done_or_missing name=${NAMES[$i]:-unknown} pid=${PIDS[$i]:-unknown} status=${STATUS[$i]:-unknown} log=${LOGS[$i]:-unknown}"
+    fi
+  done
+}
+
+handle_signal() {
+  local sig="$1"
+  local rc="$2"
+  echo "[train][signal] received ${sig} at $(date -Is); forwarding TERM to child tasks."
+  print_child_status
+  local pid
+  for pid in "${PIDS[@]:-}"; do
+    if kill -0 "${pid}" 2>/dev/null; then
+      kill -TERM "${pid}" 2>/dev/null || true
+    fi
+  done
+  echo "[train][signal] master log: ${MASTER_LOG}"
+  echo "[train][signal] output root: ${OUTPUT_ROOT}"
+  exit "${rc}"
+}
+
+trap 'handle_signal TERM 143' TERM
+trap 'handle_signal HUP 129' HUP
+trap 'handle_signal INT 130' INT
+
 if [[ ! -d "${EASIMULUS_DIR}" ]]; then
   echo "[train][error] EASimulus directory not found: ${EASIMULUS_DIR}"
   exit 1
@@ -56,6 +95,7 @@ print_runtime_info() {
   echo "[runtime] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
   echo "[runtime] WANDB_MODE=${WANDB_MODE}"
   echo "[runtime] SEED=${SEED}"
+  echo "[runtime] HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL}"
   echo "[runtime] OUTPUT_ROOT=${OUTPUT_ROOT}"
   if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader || true
@@ -151,6 +191,7 @@ start_task() {
   PIDS+=("$!")
   NAMES+=("${game_short}")
   LOGS+=("${log_file}")
+  STATUS+=("running")
   echo "[train] started ${game} on GPU ${gpu}; log=${log_file}; output=${task_output}"
 }
 
@@ -159,26 +200,49 @@ cd "${EASIMULUS_DIR}"
 print_runtime_info
 check_4gpu
 
-declare -a PIDS=()
-declare -a NAMES=()
-declare -a LOGS=()
-
 start_task 0 BreakoutNoFrameskip-v4
 start_task 1 BoxingNoFrameskip-v4
 start_task 2 SeaquestNoFrameskip-v4
 start_task 3 RoadRunnerNoFrameskip-v4
 
 failures=0
-for i in "${!PIDS[@]}"; do
-  set +e
-  wait "${PIDS[$i]}"
-  rc=$?
-  set -e
-  if (( rc != 0 )); then
-    echo "[train][fail] ${NAMES[$i]} exited with ${rc}; log=${LOGS[$i]}"
-    failures=$((failures + 1))
-  else
-    echo "[train][ok] ${NAMES[$i]} completed; log=${LOGS[$i]}"
+remaining="${#PIDS[@]}"
+last_heartbeat=0
+
+while (( remaining > 0 )); do
+  now="$(date +%s)"
+  running_jobs="$(jobs -pr || true)"
+  if (( now - last_heartbeat >= HEARTBEAT_INTERVAL )); then
+    echo "[train][heartbeat] $(date -Is) remaining=${remaining}/${#PIDS[@]} master_pid=$$"
+    print_child_status
+    if command -v nvidia-smi >/dev/null 2>&1; then
+      nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total --format=csv,noheader || true
+    fi
+    last_heartbeat="${now}"
+  fi
+
+  for i in "${!PIDS[@]}"; do
+    if [[ "${STATUS[$i]}" != "running" ]]; then
+      continue
+    fi
+    if ! grep -qx "${PIDS[$i]}" <<< "${running_jobs}"; then
+      set +e
+      wait "${PIDS[$i]}"
+      rc=$?
+      set -e
+      STATUS[$i]="${rc}"
+      remaining=$((remaining - 1))
+      if (( rc != 0 )); then
+        echo "[train][fail] ${NAMES[$i]} exited with ${rc}; log=${LOGS[$i]}"
+        failures=$((failures + 1))
+      else
+        echo "[train][ok] ${NAMES[$i]} completed; log=${LOGS[$i]}"
+      fi
+    fi
+  done
+
+  if (( remaining > 0 )); then
+    sleep 10
   fi
 done
 

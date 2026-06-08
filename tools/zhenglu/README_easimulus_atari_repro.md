@@ -113,6 +113,14 @@ Check the official reference in:
 EASimulus/config/benchmark/atari.yaml
 ```
 
+The full-training launcher writes a master heartbeat every 60 seconds by default so platform-side idle-output policies do not silently stop the top-level script:
+
+```bash
+HEARTBEAT_INTERVAL=60 bash tools/zhenglu/run_easimulus_atari_4gpu_train.sh
+```
+
+If the launcher receives `TERM`, `HUP`, or `INT`, it records `[train][signal]` plus the child PIDs and per-task log paths in the master log.
+
 Per-task logs:
 
 ```bash
