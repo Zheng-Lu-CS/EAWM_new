@@ -436,12 +436,18 @@ class Trainer:
                 to_log += eval_log
                 logger.info(eval_log)
 
+            checkpoint_every = int(getattr(
+                self.cfg.common, "checkpoint_every", self.cfg.evaluation.every
+            ))
             if (
-                self.cfg.training.should and epoch % self.cfg.evaluation.every == 0
+                self.cfg.training.should
+                and checkpoint_every > 0
+                and epoch % checkpoint_every == 0
             ):  # and not self.cfg.common.metrics_only_mode:
                 keep_agent_only = self.cfg.common.metrics_only_mode or (
                     not self.cfg.common.do_checkpoint
                 )
+                logger.info(f"Saving checkpoint at epoch {epoch}.")
                 self.save_checkpoint(save_agent_only=keep_agent_only)
 
             to_log.append({"duration": (time.time() - start_time)})

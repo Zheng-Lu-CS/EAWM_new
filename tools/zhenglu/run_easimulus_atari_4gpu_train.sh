@@ -7,6 +7,8 @@ SEED="${SEED:-0}"
 WANDB_MODE="${WANDB_MODE:-offline}"
 HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-60}"
 LAUNCH_STAGGER_SECONDS="${LAUNCH_STAGGER_SECONDS:-60}"
+AUTO_RESUME="${AUTO_RESUME:-1}"
+CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-10}"
 EASIMULUS_DIR="${PROJECT_ROOT}/EASimulus"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 LOG_DIR="${PROJECT_ROOT}/logs"
@@ -89,6 +91,11 @@ if [[ ! -d "${EASIMULUS_DIR}" ]]; then
   exit 1
 fi
 
+if ! [[ "${CHECKPOINT_EVERY}" =~ ^[0-9]+$ ]] || (( CHECKPOINT_EVERY < 1 )); then
+  echo "[train][error] CHECKPOINT_EVERY must be a positive integer; got ${CHECKPOINT_EVERY}"
+  exit 1
+fi
+
 activate_conda() {
   if ! command -v conda >/dev/null 2>&1; then
     echo "[train][error] conda is not available in PATH."
@@ -111,6 +118,8 @@ print_runtime_info() {
   echo "[runtime] SEED=${SEED}"
   echo "[runtime] HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL}"
   echo "[runtime] LAUNCH_STAGGER_SECONDS=${LAUNCH_STAGGER_SECONDS}"
+  echo "[runtime] AUTO_RESUME=${AUTO_RESUME}"
+  echo "[runtime] CHECKPOINT_EVERY=${CHECKPOINT_EVERY}"
   echo "[runtime] OUTPUT_ROOT=${OUTPUT_ROOT}"
   if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader || true
@@ -163,12 +172,78 @@ run_one() {
   } >> "${log_file}" 2>&1
 }
 
+repair_interrupted_checkpoint() {
+  local run_dir="$1"
+  local tmp_dir="${run_dir}/checkpoints_tmp"
+  local ckpt_dir="${run_dir}/checkpoints"
+  if [[ ! -d "${tmp_dir}" ]]; then
+    return 0
+  fi
+
+  echo "[train][resume] found interrupted checkpoint save: ${tmp_dir}" >&2
+  mkdir -p "${ckpt_dir}"
+  local item
+  for item in last.pt best.pt run_metadata.pt optimizer.pt num_seen_episodes_test_dataset.pt; do
+    if [[ -f "${tmp_dir}/${item}" ]]; then
+      cp -f "${tmp_dir}/${item}" "${ckpt_dir}/${item}"
+      echo "[train][resume] restored ${item} from checkpoints_tmp" >&2
+    fi
+  done
+  mv "${tmp_dir}" "${run_dir}/checkpoints_tmp.restored_${TIMESTAMP}" 2>/dev/null || true
+}
+
+is_valid_resume_dir() {
+  local run_dir="$1"
+  repair_interrupted_checkpoint "${run_dir}"
+  [[ -f "${run_dir}/checkpoints/run_metadata.pt" ]] || return 1
+  [[ -f "${run_dir}/checkpoints/last.pt" ]] || return 1
+  [[ -f "${run_dir}/checkpoints/optimizer.pt" ]] || return 1
+  [[ -f "${run_dir}/checkpoints/num_seen_episodes_test_dataset.pt" ]] || return 1
+  [[ -d "${run_dir}/checkpoints/dataset" ]] || return 1
+  return 0
+}
+
+find_resume_run_dir() {
+  local game="$1"
+  local game_short="$2"
+  if [[ "${AUTO_RESUME}" != "1" ]]; then
+    return 1
+  fi
+  if [[ ! -d "${PROJECT_ROOT}/outputs" ]]; then
+    return 1
+  fi
+
+  local line
+  local metadata
+  local run_dir
+  while IFS= read -r line; do
+    metadata="${line#* }"
+    run_dir="$(dirname "$(dirname "${metadata}")")"
+    if is_valid_resume_dir "${run_dir}"; then
+      echo "${run_dir}"
+      return 0
+    fi
+  done < <(
+    find "${PROJECT_ROOT}/outputs" \
+      -type f \
+      -path "*/${game_short}_seed${SEED}/${game}/*/*-seed-${SEED}/checkpoints/run_metadata.pt" \
+      -printf '%T@ %p\n' 2>/dev/null | sort -nr
+  )
+  return 1
+}
+
 start_task() {
   local gpu="$1"
   local game="$2"
   local game_short="${game%NoFrameskip-v4}"
   local log_file="${LOG_DIR}/train_easimulus_atari_${game_short}_seed${SEED}_${TIMESTAMP}.log"
   local task_output="${OUTPUT_ROOT}/${game_short}_seed${SEED}"
+  local resume_run_dir=""
+  if resume_run_dir="$(find_resume_run_dir "${game}" "${game_short}")"; then
+    task_output="$(dirname "$(dirname "$(dirname "${resume_run_dir}")")")"
+    log_file="${LOG_DIR}/train_easimulus_atari_${game_short}_seed${SEED}_${TIMESTAMP}_resume.log"
+    echo "[train][resume] ${game_short}: ${resume_run_dir}"
+  fi
   mkdir -p "${task_output}"
   local media_count="${MEDIA_EPISODES_TO_SAVE:-0}"
 
@@ -184,10 +259,19 @@ start_task() {
     "wandb.name=${game_short}-seed${SEED}"
     "wandb.group=easimulus_atari_4gpu_${TIMESTAMP}"
     "outputs_dir_path=${task_output}"
+    "common.checkpoint_every=${CHECKPOINT_EVERY}"
     "collection.train.num_episodes_to_save=${media_count}"
     "collection.test.num_episodes_to_save=${media_count}"
     evaluation.tokenizer.save_reconstructions=False
   )
+
+  if [[ -n "${resume_run_dir}" ]]; then
+    cmd+=(
+      common.resume=True
+      "hydra.run.dir=${resume_run_dir}"
+      hydra.output_subdir=null
+    )
+  fi
 
   (
     set +e

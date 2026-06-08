@@ -42,6 +42,8 @@ common:
   seed: 1
   sequence_length: ${world_model.retnet.max_blocks}
   resume: False # set by resume.sh script only.
+  # Engineering-only recovery knob. Defaults to the official evaluation interval.
+  checkpoint_every: ${evaluation.every}
   float32_matmul_precision: 'highest'
   num_dataloader_workers: 2
 

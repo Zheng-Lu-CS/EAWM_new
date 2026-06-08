@@ -125,6 +125,24 @@ It also staggers the four task launches by 60 seconds by default. This does not 
 LAUNCH_STAGGER_SECONDS=60 bash tools/zhenglu/run_easimulus_atari_4gpu_train.sh
 ```
 
+For long jobs that may be killed by a compute-pool walltime limit, the launcher auto-resumes by default. Re-run the same command and it will search `$PROJECT_ROOT/outputs/easimulus_atari_4gpu_*` for the latest valid checkpoint for each Atari task, then start that task with `common.resume=True` and the original Hydra run directory:
+
+```bash
+bash tools/zhenglu/run_easimulus_atari_4gpu_train.sh
+```
+
+Disable auto-resume only when intentionally starting from scratch:
+
+```bash
+AUTO_RESUME=0 bash tools/zhenglu/run_easimulus_atari_4gpu_train.sh
+```
+
+The official code normally checkpoints at the evaluation interval. For recovery robustness, this launcher saves checkpoints every 10 epochs by default without changing evaluation frequency, training steps, losses, or model configuration:
+
+```bash
+CHECKPOINT_EVERY=10 bash tools/zhenglu/run_easimulus_atari_4gpu_train.sh
+```
+
 If the launcher receives `TERM`, `HUP`, or `INT`, it records `[train][signal]` plus the child PIDs and per-task log paths in the master log.
 
 Per-task logs:
