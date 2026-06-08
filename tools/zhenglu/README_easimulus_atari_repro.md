@@ -169,3 +169,60 @@ To inspect a task:
 ```bash
 tail -f /data/share/hxd/zhenglu/eawm/logs/train_easimulus_atari_Breakout_seed0_<timestamp>.log
 ```
+
+## Official Checkpoint Demo Videos
+
+Put official pretrained Atari weights in the project-root checkpoint directory:
+
+```bash
+/data/share/hxd/zhenglu/eawm/ckpt/Breakout.pt
+/data/share/hxd/zhenglu/eawm/ckpt/Boxing.pt
+/data/share/hxd/zhenglu/eawm/ckpt/RoadRunner.pt
+```
+
+The root `.gitignore` ignores checkpoint payloads under `ckpt/`, while keeping `ckpt/.gitkeep`.
+
+After `tools/zhenglu/setup_easimulus_atari_env.sh` has completed, run the demo environment check:
+
+```bash
+bash tools/zhenglu/setup_easimulus_atari_demo_env.sh
+```
+
+Then run 4-GPU demo recording inside a 4-GPU compute job:
+
+```bash
+bash tools/zhenglu/run_easimulus_atari_4gpu_demo.sh
+```
+
+The script scans `ckpt/*.pt`, maps each filename stem to the Atari env id, and records one 3-minute video per checkpoint:
+
+```text
+ckpt/Breakout.pt    -> BreakoutNoFrameskip-v4
+ckpt/Seaquest.pt    -> SeaquestNoFrameskip-v4
+ckpt/RoadRunner.pt  -> RoadRunnerNoFrameskip-v4
+```
+
+It runs up to four checkpoints concurrently, one process per GPU, then continues with the next batch. To record only selected tasks:
+
+```bash
+TASKS=Breakout,Boxing,Seaquest,RoadRunner bash tools/zhenglu/run_easimulus_atari_4gpu_demo.sh
+```
+
+Default video settings are 180 seconds at 15 FPS. Override them with:
+
+```bash
+VIDEO_SECONDS=180 FPS=15 bash tools/zhenglu/run_easimulus_atari_4gpu_demo.sh
+```
+
+Demo logs:
+
+```bash
+$PROJECT_ROOT/logs/demo_easimulus_atari_<task>_<timestamp>.log
+$PROJECT_ROOT/logs/demo_easimulus_atari_4gpu_<timestamp>.log
+```
+
+Demo videos:
+
+```bash
+$PROJECT_ROOT/videos/easimulus_atari_demo_<timestamp>/<task>.mp4
+```
