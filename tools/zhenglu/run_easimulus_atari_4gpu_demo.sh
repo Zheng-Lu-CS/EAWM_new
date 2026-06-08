@@ -4,7 +4,7 @@ set -Eeuo pipefail
 PROJECT_ROOT="${PROJECT_ROOT:-/data/share/hxd/zhenglu/eawm}"
 ENV_NAME="${ENV_NAME:-zhenglu_easimulus}"
 EASIMULUS_DIR="${PROJECT_ROOT}/EASimulus"
-CKPT_DIR="${CKPT_DIR:-${PROJECT_ROOT}/ckpt}"
+CKPT_DIR="${CKPT_DIR:-${PROJECT_ROOT}/ckpt/EASimulus/Atari}"
 VIDEO_SECONDS="${VIDEO_SECONDS:-180}"
 FPS="${FPS:-15}"
 SEED="${SEED:-0}"

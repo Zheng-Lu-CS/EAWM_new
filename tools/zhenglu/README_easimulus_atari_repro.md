@@ -172,15 +172,19 @@ tail -f /data/share/hxd/zhenglu/eawm/logs/train_easimulus_atari_Breakout_seed0_<
 
 ## Official Checkpoint Demo Videos
 
-Put official pretrained Atari weights in the project-root checkpoint directory:
+Put official pretrained EASimulus Atari weights in this checkpoint directory:
 
 ```bash
-/data/share/hxd/zhenglu/eawm/ckpt/Breakout.pt
-/data/share/hxd/zhenglu/eawm/ckpt/Boxing.pt
-/data/share/hxd/zhenglu/eawm/ckpt/RoadRunner.pt
+/data/share/hxd/zhenglu/eawm/ckpt/EASimulus/Atari/Breakout.pt
+/data/share/hxd/zhenglu/eawm/ckpt/EASimulus/Atari/Boxing.pt
+/data/share/hxd/zhenglu/eawm/ckpt/EASimulus/Atari/RoadRunner.pt
 ```
 
-The root `.gitignore` ignores checkpoint payloads under `ckpt/`, while keeping `ckpt/.gitkeep`.
+The root `.gitignore` ignores checkpoint payloads under `ckpt/`, while keeping `ckpt/.gitkeep`. The demo scripts default to:
+
+```bash
+CKPT_DIR=/data/share/hxd/zhenglu/eawm/ckpt/EASimulus/Atari
+```
 
 After `tools/zhenglu/setup_easimulus_atari_env.sh` has completed, run the demo environment check:
 
@@ -194,12 +198,12 @@ Then run 4-GPU demo recording inside a 4-GPU compute job:
 bash tools/zhenglu/run_easimulus_atari_4gpu_demo.sh
 ```
 
-The script scans `ckpt/*.pt`, maps each filename stem to the Atari env id, and records one 3-minute video per checkpoint:
+The script scans `$CKPT_DIR/*.pt`, maps each filename stem to the Atari env id, and records one 3-minute video per checkpoint:
 
 ```text
-ckpt/Breakout.pt    -> BreakoutNoFrameskip-v4
-ckpt/Seaquest.pt    -> SeaquestNoFrameskip-v4
-ckpt/RoadRunner.pt  -> RoadRunnerNoFrameskip-v4
+ckpt/EASimulus/Atari/Breakout.pt    -> BreakoutNoFrameskip-v4
+ckpt/EASimulus/Atari/Seaquest.pt    -> SeaquestNoFrameskip-v4
+ckpt/EASimulus/Atari/RoadRunner.pt  -> RoadRunnerNoFrameskip-v4
 ```
 
 It runs up to four checkpoints concurrently, one process per GPU, then continues with the next batch. To record only selected tasks:

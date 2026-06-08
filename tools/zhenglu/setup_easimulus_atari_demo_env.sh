@@ -4,11 +4,12 @@ set -Eeuo pipefail
 PROJECT_ROOT="${PROJECT_ROOT:-/data/share/hxd/zhenglu/eawm}"
 ENV_NAME="${ENV_NAME:-zhenglu_easimulus}"
 EASIMULUS_DIR="${PROJECT_ROOT}/EASimulus"
+CKPT_DIR="${CKPT_DIR:-${PROJECT_ROOT}/ckpt/EASimulus/Atari}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 LOG_DIR="${PROJECT_ROOT}/logs"
 LOG_FILE="${LOG_DIR}/setup_easimulus_atari_demo_${TIMESTAMP}.log"
 
-mkdir -p "${LOG_DIR}" "${PROJECT_ROOT}/ckpt" "${PROJECT_ROOT}/videos" \
+mkdir -p "${LOG_DIR}" "${CKPT_DIR}" "${PROJECT_ROOT}/videos" \
   "${PROJECT_ROOT}/cache/pip" "${PROJECT_ROOT}/cache/torch" \
   "${PROJECT_ROOT}/cache/huggingface" "${PROJECT_ROOT}/cache/xdg" \
   "${PROJECT_ROOT}/cache/matplotlib"
@@ -30,6 +31,7 @@ echo "[demo-setup] date: $(date -Is)"
 echo "[demo-setup] pwd: $(pwd)"
 echo "[demo-setup] PROJECT_ROOT=${PROJECT_ROOT}"
 echo "[demo-setup] ENV_NAME=${ENV_NAME}"
+echo "[demo-setup] CKPT_DIR=${CKPT_DIR}"
 echo "[demo-setup] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
 
 if [[ ! -d "${EASIMULUS_DIR}" ]]; then
@@ -91,12 +93,12 @@ env.close()
 print("[demo-setup] BreakoutNoFrameskip-v4 reset/step OK")
 PY
 
-if [[ ! -d "${PROJECT_ROOT}/ckpt" ]]; then
-  echo "[demo-setup][error] ckpt directory was not created."
+if [[ ! -d "${CKPT_DIR}" ]]; then
+  echo "[demo-setup][error] checkpoint directory was not created: ${CKPT_DIR}"
   exit 1
 fi
 
 echo "[demo-setup] Done. Put official checkpoints such as Breakout.pt under:"
-echo "  ${PROJECT_ROOT}/ckpt"
+echo "  ${CKPT_DIR}"
 echo "[demo-setup] Then run:"
-echo "  cd ${PROJECT_ROOT} && PROJECT_ROOT=${PROJECT_ROOT} ENV_NAME=${ENV_NAME} bash tools/zhenglu/run_easimulus_atari_4gpu_demo.sh"
+echo "  cd ${PROJECT_ROOT} && PROJECT_ROOT=${PROJECT_ROOT} ENV_NAME=${ENV_NAME} CKPT_DIR=${CKPT_DIR} bash tools/zhenglu/run_easimulus_atari_4gpu_demo.sh"

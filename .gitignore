@@ -1,5 +1,6 @@
 outputs/
 cache/
+logs/
 ckpt/*
 !ckpt/.gitkeep
 videos/
