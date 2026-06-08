@@ -119,6 +119,12 @@ The full-training launcher writes a master heartbeat every 60 seconds by default
 HEARTBEAT_INTERVAL=60 bash tools/zhenglu/run_easimulus_atari_4gpu_train.sh
 ```
 
+It also staggers the four task launches by 60 seconds by default. This does not change training hyperparameters; it only reduces simultaneous PyTorch compile/init, W&B, cache, and filesystem pressure:
+
+```bash
+LAUNCH_STAGGER_SECONDS=60 bash tools/zhenglu/run_easimulus_atari_4gpu_train.sh
+```
+
 If the launcher receives `TERM`, `HUP`, or `INT`, it records `[train][signal]` plus the child PIDs and per-task log paths in the master log.
 
 Per-task logs:

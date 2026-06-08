@@ -6,6 +6,7 @@ ENV_NAME="${ENV_NAME:-zhenglu_easimulus}"
 SEED="${SEED:-0}"
 WANDB_MODE="${WANDB_MODE:-offline}"
 HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-60}"
+LAUNCH_STAGGER_SECONDS="${LAUNCH_STAGGER_SECONDS:-60}"
 EASIMULUS_DIR="${PROJECT_ROOT}/EASimulus"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 LOG_DIR="${PROJECT_ROOT}/logs"
@@ -36,17 +37,27 @@ declare -a PIDS=()
 declare -a NAMES=()
 declare -a LOGS=()
 declare -a STATUS=()
+HEARTBEAT_PID=""
 
 print_child_status() {
   local i
-  local running_jobs
-  running_jobs="$(jobs -pr || true)"
   for i in "${!PIDS[@]}"; do
-    if [[ "${STATUS[$i]:-running}" == "running" ]] && grep -qx "${PIDS[$i]}" <<< "${running_jobs}"; then
+    if [[ "${STATUS[$i]:-running}" == "running" ]] && kill -0 "${PIDS[$i]}" 2>/dev/null; then
       echo "[train][status] running name=${NAMES[$i]} pid=${PIDS[$i]} log=${LOGS[$i]}"
     else
       echo "[train][status] done_or_missing name=${NAMES[$i]:-unknown} pid=${PIDS[$i]:-unknown} status=${STATUS[$i]:-unknown} log=${LOGS[$i]:-unknown}"
     fi
+  done
+}
+
+heartbeat_loop() {
+  while true; do
+    echo "[train][heartbeat] $(date -Is) master_pid=$$ heartbeat_pid=${BASHPID}"
+    print_child_status
+    if command -v nvidia-smi >/dev/null 2>&1; then
+      nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total --format=csv,noheader || true
+    fi
+    sleep "${HEARTBEAT_INTERVAL}"
   done
 }
 
@@ -55,6 +66,9 @@ handle_signal() {
   local rc="$2"
   echo "[train][signal] received ${sig} at $(date -Is); forwarding TERM to child tasks."
   print_child_status
+  if [[ -n "${HEARTBEAT_PID}" ]] && kill -0 "${HEARTBEAT_PID}" 2>/dev/null; then
+    kill -TERM "${HEARTBEAT_PID}" 2>/dev/null || true
+  fi
   local pid
   for pid in "${PIDS[@]:-}"; do
     if kill -0 "${pid}" 2>/dev/null; then
@@ -96,6 +110,7 @@ print_runtime_info() {
   echo "[runtime] WANDB_MODE=${WANDB_MODE}"
   echo "[runtime] SEED=${SEED}"
   echo "[runtime] HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL}"
+  echo "[runtime] LAUNCH_STAGGER_SECONDS=${LAUNCH_STAGGER_SECONDS}"
   echo "[runtime] OUTPUT_ROOT=${OUTPUT_ROOT}"
   if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader || true
@@ -201,50 +216,39 @@ print_runtime_info
 check_4gpu
 
 start_task 0 BreakoutNoFrameskip-v4
+echo "[train] sleeping ${LAUNCH_STAGGER_SECONDS}s before launching Boxing to reduce concurrent compile/init pressure"
+sleep "${LAUNCH_STAGGER_SECONDS}"
 start_task 1 BoxingNoFrameskip-v4
+echo "[train] sleeping ${LAUNCH_STAGGER_SECONDS}s before launching Seaquest to reduce concurrent compile/init pressure"
+sleep "${LAUNCH_STAGGER_SECONDS}"
 start_task 2 SeaquestNoFrameskip-v4
+echo "[train] sleeping ${LAUNCH_STAGGER_SECONDS}s before launching RoadRunner to reduce concurrent compile/init pressure"
+sleep "${LAUNCH_STAGGER_SECONDS}"
 start_task 3 RoadRunnerNoFrameskip-v4
 
+heartbeat_loop &
+HEARTBEAT_PID="$!"
+echo "[train] heartbeat started pid=${HEARTBEAT_PID}; interval=${HEARTBEAT_INTERVAL}s"
+
 failures=0
-remaining="${#PIDS[@]}"
-last_heartbeat=0
-
-while (( remaining > 0 )); do
-  now="$(date +%s)"
-  running_jobs="$(jobs -pr || true)"
-  if (( now - last_heartbeat >= HEARTBEAT_INTERVAL )); then
-    echo "[train][heartbeat] $(date -Is) remaining=${remaining}/${#PIDS[@]} master_pid=$$"
-    print_child_status
-    if command -v nvidia-smi >/dev/null 2>&1; then
-      nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total --format=csv,noheader || true
-    fi
-    last_heartbeat="${now}"
-  fi
-
-  for i in "${!PIDS[@]}"; do
-    if [[ "${STATUS[$i]}" != "running" ]]; then
-      continue
-    fi
-    if ! grep -qx "${PIDS[$i]}" <<< "${running_jobs}"; then
-      set +e
-      wait "${PIDS[$i]}"
-      rc=$?
-      set -e
-      STATUS[$i]="${rc}"
-      remaining=$((remaining - 1))
-      if (( rc != 0 )); then
-        echo "[train][fail] ${NAMES[$i]} exited with ${rc}; log=${LOGS[$i]}"
-        failures=$((failures + 1))
-      else
-        echo "[train][ok] ${NAMES[$i]} completed; log=${LOGS[$i]}"
-      fi
-    fi
-  done
-
-  if (( remaining > 0 )); then
-    sleep 10
+for i in "${!PIDS[@]}"; do
+  set +e
+  wait "${PIDS[$i]}"
+  rc=$?
+  set -e
+  STATUS[$i]="${rc}"
+  if (( rc != 0 )); then
+    echo "[train][fail] ${NAMES[$i]} exited with ${rc}; log=${LOGS[$i]}"
+    failures=$((failures + 1))
+  else
+    echo "[train][ok] ${NAMES[$i]} completed; log=${LOGS[$i]}"
   fi
 done
+
+if [[ -n "${HEARTBEAT_PID}" ]] && kill -0 "${HEARTBEAT_PID}" 2>/dev/null; then
+  kill -TERM "${HEARTBEAT_PID}" 2>/dev/null || true
+  wait "${HEARTBEAT_PID}" 2>/dev/null || true
+fi
 
 if (( failures > 0 )); then
   echo "[train][error] ${failures} Atari training task(s) failed. Master log: ${MASTER_LOG}"
