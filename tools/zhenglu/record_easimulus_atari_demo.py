@@ -89,7 +89,8 @@ def main() -> None:
     print(f"[demo] cfg.common.device={cfg.common.device}")
     print(f"[demo] lpips={cfg.tokenizer.image.vgg_lpips_ckpt_path}")
 
-    env_fn = lambda: instantiate(config=cfg.env.test)
+    env_partial = instantiate(cfg.env.test)
+    env_fn = lambda: env_partial(tokenizer_config=cfg.tokenizer)
     test_env = SingleProcessEnv(env_fn)
     device = torch.device(cfg.common.device)
     agent = build_agent(test_env, cfg, device)
