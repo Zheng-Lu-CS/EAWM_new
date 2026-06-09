@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from hydra import compose, initialize_config_dir
 from hydra.utils import instantiate
+from PIL import Image, ImageDraw, ImageFont
 
 from envs import SingleProcessEnv
 from game import AgentEnv
@@ -25,6 +26,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seconds", type=int, default=180)
     parser.add_argument("--fps", type=int, default=15)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--min-width", type=int, default=0)
+    parser.add_argument("--overlay-line", action="append", default=[])
     return parser.parse_args()
 
 
@@ -56,6 +59,41 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def add_overlay(image: Image.Image, lines: list[str]) -> Image.Image:
+    if not lines:
+        return image
+
+    image = image.convert("RGBA")
+    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    font = ImageFont.load_default()
+
+    padding = 8
+    line_gap = 4
+    text_metrics = [draw.textbbox((0, 0), line, font=font) for line in lines]
+    text_width = max((box[2] - box[0] for box in text_metrics), default=0)
+    text_height = sum(box[3] - box[1] for box in text_metrics) + line_gap * max(len(lines) - 1, 0)
+
+    x0, y0 = 8, 8
+    x1 = min(image.width - 8, x0 + text_width + padding * 2)
+    y1 = min(image.height - 8, y0 + text_height + padding * 2)
+    draw.rounded_rectangle((x0, y0, x1, y1), radius=4, fill=(0, 0, 0, 170))
+
+    y = y0 + padding
+    for line, box in zip(lines, text_metrics):
+        draw.text((x0 + padding, y), line, font=font, fill=(255, 255, 255, 255))
+        y += (box[3] - box[1]) + line_gap
+
+    return Image.alpha_composite(image, overlay).convert("RGB")
+
+
+def resize_to_min_width(image: Image.Image, min_width: int) -> Image.Image:
+    if min_width <= 0 or image.width >= min_width:
+        return image
+    height = max(1, round(image.height * min_width / image.width))
+    return image.resize((min_width, height), resample=Image.NEAREST)
+
+
 def main() -> None:
     args = parse_args()
     easimulus_dir = args.easimulus_dir.resolve()
@@ -83,6 +121,11 @@ def main() -> None:
     print(f"[demo] checkpoint={checkpoint}")
     print(f"[demo] output={output}")
     print(f"[demo] seconds={args.seconds}, fps={args.fps}, frames={args.seconds * args.fps}")
+    print(f"[demo] min_width={args.min_width}")
+    if args.overlay_line:
+        print("[demo] overlay:")
+        for line in args.overlay_line:
+            print(f"[demo]   {line}")
     print(f"[demo] cuda_visible_devices={os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')}")
     print(f"[demo] torch={torch.__version__}, cuda={torch.version.cuda}, device={torch.cuda.get_device_name(0)}")
     print(f"[demo] cfg.env.test.id={cfg.env.test.id}")
@@ -112,6 +155,8 @@ def main() -> None:
                 if frame_idx % max(args.fps * 10, 1) == 0:
                     print(f"[demo] frame {frame_idx}/{total_frames}", flush=True)
                 image = demo_env.render()
+                image = resize_to_min_width(image, args.min_width)
+                image = add_overlay(image, args.overlay_line)
                 writer.append_data(np.asarray(image.convert("RGB")))
                 _, _, terminated, truncated, _ = demo_env.step()
                 if bool(terminated[0]) or bool(truncated[0]):
