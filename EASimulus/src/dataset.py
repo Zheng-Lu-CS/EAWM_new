@@ -1,5 +1,6 @@
 import os
 from collections import deque
+import pickle
 import math
 from pathlib import Path
 import random
@@ -9,6 +10,10 @@ import cv2
 import hydra
 import psutil
 import torch
+try:
+    from torch.serialization import safe_globals
+except ImportError:
+    safe_globals = None
 from torch.utils.data import Dataset
 import numpy as np
 from loguru import logger
@@ -258,10 +263,23 @@ class EpisodesDataset:
         ), f"Expected '{directory}' to be a directory; Expected 0 episodes, got {len(self.episodes)}"
         episode_ids = sorted([int(p.stem) for p in directory.iterdir()])
         self.num_seen_episodes = episode_ids[-1] + 1
+        used_legacy_load = False
         for episode_id in episode_ids:
-            episode = Episode.from_dict(
-                torch.load(directory / f"{episode_id}.pt", weights_only=True)
-            )
+            episode_path = directory / f"{episode_id}.pt"
+            try:
+                episode_dict = torch.load(episode_path, weights_only=True)
+            except pickle.UnpicklingError as exc:
+                if "ObsModality" not in str(exc) or safe_globals is None:
+                    raise
+                if not used_legacy_load:
+                    logger.warning(
+                        "Loading legacy episode checkpoints containing ObsModality enum keys. "
+                        "Future checkpoints will be saved with string keys."
+                    )
+                    used_legacy_load = True
+                with safe_globals([ObsModality]):
+                    episode_dict = torch.load(episode_path, weights_only=True)
+            episode = Episode.from_dict(episode_dict)
             self.episode_id_to_queue_idx[episode_id] = len(self.episodes)
             self.episodes.append(episode)
 

@@ -97,6 +97,8 @@ class Episode:
     def to_dict(self):
         obj = self.__dict__.copy()
         obj['observations'] = {k.name: v for k, v in obj['observations'].items()}
+        if obj['events'] is not None:
+            obj['events'] = {k.name: v for k, v in obj['events'].items()}
         return obj
 
     def save(self, path: Path) -> None:
@@ -105,5 +107,10 @@ class Episode:
     @classmethod
     def from_dict(cls, dict_episode):
         dict_episode['observations'] = {ObsModality[k]: v for k, v in dict_episode['observations'].items()}
+        if dict_episode['events'] is not None:
+            dict_episode['events'] = {
+                ObsModality[k] if isinstance(k, str) else k: v
+                for k, v in dict_episode['events'].items()
+            }
         dict_episode['ends'] = dict_episode['ends'].long()
         return Episode(**dict_episode)
