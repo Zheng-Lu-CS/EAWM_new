@@ -68,16 +68,22 @@ from dataset import (
 import dataset
 
 
+CHECKPOINT_ARCHITECTURE_TAG = os.environ.get("EASIMULUS_ARCH_TAG", "easimulus_dense_v1")
+CHECKPOINT_ARCHITECTURE_FILE = "architecture.txt"
+
+
 class RunMetadata:
     def __init__(
         self,
         epoch: int = 1,
         best_eval_score: Optional[float] = None,
         epoch_of_best_score: Optional[int] = None,
+        architecture_tag: Optional[str] = None,
     ):
         self.epoch = epoch
         self.best_eval_score = best_eval_score
         self.epoch_of_best_score = epoch_of_best_score
+        self.architecture_tag = architecture_tag or CHECKPOINT_ARCHITECTURE_TAG
 
     def update_eval_score(self, score: float):
         if self.best_eval_score is None or score >= self.best_eval_score:
@@ -93,6 +99,7 @@ class RunMetadata:
             "epoch": self.epoch,
             "best_eval_score": self.best_eval_score,
             "epoch_of_best_score": self.epoch_of_best_score,
+            "architecture_tag": self.architecture_tag,
         }
 
 
@@ -381,7 +388,7 @@ class Trainer:
             )
             self.train_dataset.load_disk_checkpoint(dataset_path)
 
-        self.run_metadata = RunMetadata()
+        self.run_metadata = RunMetadata(architecture_tag=CHECKPOINT_ARCHITECTURE_TAG)
 
         if cfg.common.resume:
             self.load_checkpoint()
@@ -906,6 +913,9 @@ class Trainer:
                     self.test_dataset.num_seen_episodes,
                     self.ckpt_dir / "num_seen_episodes_test_dataset.pt",
                 )
+            (self.ckpt_dir / CHECKPOINT_ARCHITECTURE_FILE).write_text(
+                f"{CHECKPOINT_ARCHITECTURE_TAG}\n", encoding="utf-8"
+            )
 
     def save_checkpoint(self, save_agent_only: bool) -> None:
         tmp_checkpoint_dir = Path("checkpoints_tmp")

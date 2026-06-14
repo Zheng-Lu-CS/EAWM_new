@@ -14,6 +14,9 @@ SERVER_NAME="${SERVER_NAME:-${TASK,,}_dense_ablation_2gpu}"
 HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-60}"
 LAUNCH_STAGGER_SECONDS="${LAUNCH_STAGGER_SECONDS:-60}"
 AUTO_RESUME="${AUTO_RESUME:-1}"
+ARCH_TAG="${ARCH_TAG:-easimulus_dense_v1}"
+ALLOW_UNTAGGED_RESUME="${ALLOW_UNTAGGED_RESUME:-0}"
+ARCH_MARKER_FILE="${ARCH_MARKER_FILE:-architecture.txt}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-10}"
 MEDIA_EPISODES_TO_SAVE="${MEDIA_EPISODES_TO_SAVE:-0}"
 RETRY_MEDIA_SAVE_ONE="${RETRY_MEDIA_SAVE_ONE:-1}"
@@ -44,6 +47,7 @@ export MPLCONFIGDIR="${PROJECT_ROOT}/cache/matplotlib"
 export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
 export WANDB_MODE
+export EASIMULUS_ARCH_TAG="${ARCH_TAG}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-8}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-8}"
@@ -97,7 +101,7 @@ repair_interrupted_checkpoint() {
   echo "[train][resume] found interrupted checkpoint save: ${tmp_dir}" >&2
   mkdir -p "${ckpt_dir}"
   local item
-  for item in last.pt best.pt run_metadata.pt optimizer.pt num_seen_episodes_test_dataset.pt; do
+  for item in last.pt best.pt run_metadata.pt optimizer.pt num_seen_episodes_test_dataset.pt "${ARCH_MARKER_FILE}"; do
     if [[ -f "${tmp_dir}/${item}" ]]; then
       cp -f "${tmp_dir}/${item}" "${ckpt_dir}/${item}"
     fi
@@ -113,6 +117,18 @@ is_valid_resume_dir() {
   [[ -f "${run_dir}/checkpoints/optimizer.pt" ]] || return 1
   [[ -f "${run_dir}/checkpoints/num_seen_episodes_test_dataset.pt" ]] || return 1
   [[ -d "${run_dir}/checkpoints/dataset" ]] || return 1
+  local arch_file="${run_dir}/checkpoints/${ARCH_MARKER_FILE}"
+  if [[ -f "${arch_file}" ]]; then
+    local saved_arch
+    saved_arch="$(tr -d '[:space:]' < "${arch_file}")"
+    if [[ "${saved_arch}" != "${ARCH_TAG}" ]]; then
+      echo "[train][resume_skip] ${run_dir}: architecture tag '${saved_arch}' != '${ARCH_TAG}'." >&2
+      return 1
+    fi
+  elif [[ "${ALLOW_UNTAGGED_RESUME}" != "1" ]]; then
+    echo "[train][resume_skip] ${run_dir}: missing ${ARCH_MARKER_FILE}; set ALLOW_UNTAGGED_RESUME=1 to override." >&2
+    return 1
+  fi
   return 0
 }
 
@@ -255,7 +271,7 @@ trap 'cleanup 130' INT
 activate_conda
 cd "${EASIMULUS_DIR}"
 check_inputs
-echo "[runtime] TASK=${TASK} SEED=${SEED} OUTPUT_ROOT=${OUTPUT_ROOT} MASTER_LOG=${MASTER_LOG}"
+echo "[runtime] TASK=${TASK} SEED=${SEED} ARCH_TAG=${ARCH_TAG} AUTO_RESUME=${AUTO_RESUME} ALLOW_UNTAGGED_RESUME=${ALLOW_UNTAGGED_RESUME} OUTPUT_ROOT=${OUTPUT_ROOT} MASTER_LOG=${MASTER_LOG}"
 
 heartbeat_loop &
 HEARTBEAT_PID="$!"
