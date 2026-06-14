@@ -280,11 +280,15 @@ class WorldmodelInfoHandler(TrainerInfoHandler):
             if k=="change_percents":
                 for modality,mc in v.items():
                     self.buffer.setdefault(modality.name+"_change_percents", []).append(mc.mean())
+            elif k.startswith("dense_"):
+                if not torch.is_tensor(v):
+                    v = torch.tensor(float(v))
+                self.buffer.setdefault(k, []).append(v.float().mean())
 
     def get_epoch_info(self) -> dict:
         info = {}
         for k, v in self.buffer.items():
-            if k.endswith('_change_percents'):
+            if k.endswith('_change_percents') or k.startswith("dense_"):
                 info[k] = torch.stack(v).mean().item()
 
         return info

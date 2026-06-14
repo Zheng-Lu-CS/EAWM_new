@@ -26,3 +26,6 @@ convmotdecoder: False
 judge_tendency: False
 tend_threshold: 0.01
 reward_end_use_all_embedding: False
+use_dense_ssl: True
+use_unchanged_patch_weighting: False
+unchanged_patch_loss_weight: 0.2

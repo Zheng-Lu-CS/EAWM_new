@@ -344,7 +344,7 @@ class Trainer:
                     ].vocab_size
                 )
         
-        self.worldmodel_info_handler = WorldmodelInfoHandler() if self.cfg.world_model.event_pred else None
+        self.worldmodel_info_handler = WorldmodelInfoHandler()
 
         logger.info(
             f"{sum(p.numel() for p in self.agent.world_model.parameters())} parameters in agent.world_model"
@@ -496,7 +496,7 @@ class Trainer:
                     epoch,
                     self.agent.tokenizer,
                     self.optimizer_tokenizer,
-                    sequence_length=1,
+                    sequence_length=2,
                     sample_from_start=True,
                     context_len=0,
                     info_handler=self.tokenizer_info_handler,
@@ -724,7 +724,7 @@ class Trainer:
             metrics_tokenizer = self.eval_component(
                 self.agent.tokenizer,
                 cfg_tokenizer.batch_num_samples,
-                sequence_length=1,
+                sequence_length=2,
                 context_length=0,
             )
 

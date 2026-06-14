@@ -28,6 +28,7 @@ def make_atari(id, hsize=64,wsize=64, max_episode_steps=None, noop_max=30, frame
     env = MaxAndSkipEnv(env, skip=frame_skip)
     if done_on_life_loss:
         env = EpisodicLifeEnv(env)
+    env = TemporalGrayStackWrapper(env)
 
     env = DictObsWrapper(env)
     env = MultiModalObsWrapper(env, obs_key_to_modality={DictObsWrapper.key: ObsModality.image})
@@ -77,6 +78,49 @@ class ResizeObsWrapper(gymnasium.ObservationWrapper):
     def observation(self, observation: np.ndarray) -> np.ndarray:
         self.unwrapped.original_obs = observation
         return self.resize(observation)
+
+
+class TemporalGrayStackWrapper(gymnasium.Wrapper):
+    """Stack the last three agent-visible grayscale frames as image channels."""
+
+    def __init__(self, env: gymnasium.Env):
+        gymnasium.Wrapper.__init__(self, env)
+        h, w = env.observation_space.shape[:2]
+        self.observation_space = gymnasium.spaces.Box(
+            low=0, high=255, shape=(h, w, 3), dtype=np.uint8
+        )
+        self._frames = []
+
+    @staticmethod
+    def _to_gray(obs: np.ndarray) -> np.ndarray:
+        if obs.ndim == 2:
+            return obs.astype(np.uint8)
+        assert obs.ndim == 3 and obs.shape[-1] == 3, f"Got observation shape {obs.shape}"
+        gray = (
+            0.299 * obs[..., 0].astype(np.float32)
+            + 0.587 * obs[..., 1].astype(np.float32)
+            + 0.114 * obs[..., 2].astype(np.float32)
+        )
+        return np.rint(gray).clip(0, 255).astype(np.uint8)
+
+    def _stack(self) -> np.ndarray:
+        assert len(self._frames) == 3
+        return np.stack(self._frames, axis=-1)
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        gray = self._to_gray(obs)
+        self._frames = [gray.copy(), gray.copy(), gray.copy()]
+        return self._stack(), info
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        gray = self._to_gray(obs)
+        if len(self._frames) != 3:
+            self._frames = [gray.copy(), gray.copy(), gray.copy()]
+        else:
+            self._frames = [self._frames[1], self._frames[2], gray]
+        return self._stack(), reward, terminated, truncated, info
 
 
 class RewardClippingWrapper(gymnasium.RewardWrapper):

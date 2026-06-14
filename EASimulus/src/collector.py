@@ -125,7 +125,10 @@ class Collector:
                     imagemot=[]
                     #print(f"self.obs['image'][0].shape={self.obs['image'][0].shape}")
                     for i in range(self.env.num_envs):
-                        mot = self.backs[i].apply(self.obs['image'][i][0])
+                        image_obs = self.obs['image'][i][0]
+                        if image_obs.ndim == 3 and image_obs.shape[-1] == 3:
+                            image_obs = image_obs[..., -1]
+                        mot = self.backs[i].apply(image_obs)
                         mot_close = cv2.morphologyEx(mot, cv2.MORPH_CLOSE, self.kernel)//255
                         imagemot.append(mot_close)
                     self.event[ObsModality.image]=np.array(imagemot)

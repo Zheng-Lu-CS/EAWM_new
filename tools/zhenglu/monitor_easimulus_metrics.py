@@ -64,7 +64,10 @@ def print_metric(task: str, epoch: int | None, name: str, pairs: dict[str, float
             f"obs={fmt(pairs.get('world_model/train/loss_obs'))} "
             f"reward={fmt(pairs.get('world_model/train/loss_rewards'))} "
             f"event={fmt(pairs.get('world_model/train/loss_events'))} "
-            f"curiosity={fmt(pairs.get('world_model/train/curiosity_loss'))}",
+            f"curiosity={fmt(pairs.get('world_model/train/curiosity_loss'))} "
+            f"changed={fmt(pairs.get('world_model/train/dense_changed_patch_fraction'))} "
+            f"unchanged={fmt(pairs.get('world_model/train/dense_unchanged_patch_fraction'))} "
+            f"dense_w={fmt(pairs.get('world_model/train/dense_mean_patch_loss_weight'))}",
             flush=True,
         )
     elif name == "actor_critic":

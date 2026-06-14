@@ -471,16 +471,16 @@ class ActorCriticLS(nn.Module):
 
         # reset WM env:
         ctx_len = self.context_len
-        action_seq_len = world_model.tokens_per_action
         ctx = world_model.get_tokens_emb(
-            {k: obs_tokens[k][:, -ctx_len - 1 : -1] for k in obs_tokens.keys()},
-            batch["actions"][:, -ctx_len - 1 : -1],
+            {k: obs_tokens[k][:, -ctx_len:] for k in obs_tokens.keys()},
+            batch["actions"][:, -ctx_len:],
             tokenizer=tokenizer,
-        ).flatten(1, 2)[:, :-action_seq_len]
+        ).flatten(1, 2)
 
         wm_env.reset_from_initial_observations(
             ctx,
             return_tokens=True,
+            ctx_actions=batch["actions"][:, -ctx_len:],
         )
 
         return wm_env, {k: v[:, -1] for k, v in obs_tokens.items()}
@@ -713,16 +713,16 @@ class ActorCriticLS(nn.Module):
             ac_actions_embs=ac_actions_embs,
         )
         ctx_len = self.context_len
-        action_seq_len = world_model.tokens_per_action
         ctx = world_model.get_tokens_emb(
-            {k: obs_tokens[k][:, -ctx_len - effective_horizon - 1 : - effective_horizon - 1] for k in obs_tokens.keys()},
-            batch["actions"][:, -ctx_len - effective_horizon - 1 : - effective_horizon - 1],
+            {k: obs_tokens[k][:, -ctx_len - effective_horizon : - effective_horizon] for k in obs_tokens.keys()},
+            batch["actions"][:, -ctx_len - effective_horizon : - effective_horizon],
             tokenizer=tokenizer,
-        ).flatten(1, 2)[:, :-action_seq_len]
+        ).flatten(1, 2)
 
         wm_env.reset_from_initial_observations(
             ctx,
             return_tokens=True,
+            ctx_actions=batch["actions"][:, -ctx_len - effective_horizon : - effective_horizon],
         )
         all_actions_dists = []
         all_values_info = []

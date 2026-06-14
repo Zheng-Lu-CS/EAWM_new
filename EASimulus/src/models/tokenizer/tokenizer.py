@@ -212,32 +212,62 @@ class ImageTokenizer(TokenizerBase):
         obs = batch["observations"][ObsModality.image]
         t = obs.shape[1]
         b = obs.shape[0]
-        assert t == 1
-        observations = self.preprocess_input(rearrange(obs, "b t c h w -> (b t) c h w"))
+        assert t >= 2, "ImageTokenizer next-stack training requires at least two observations."
+        inputs = obs[:, :-1]
+        targets = obs[:, 1:]
+        observations = self.preprocess_input(rearrange(inputs, "b t c h w -> (b t) c h w"))
+        target_observations = self.preprocess_input(
+            rearrange(targets, "b t c h w -> (b t) c h w")
+        )
         z, z_quantized, reconstructions, tokens = self(
             observations,
             should_preprocess=False,
             should_postprocess=False,
             return_tokens=True,
         )
+        valid_mask = batch.get(
+            "mask_padding",
+            torch.ones(obs.shape[:2], dtype=torch.bool, device=obs.device),
+        )[:, 1:].flatten()
+        assert valid_mask.any(), "Tokenizer batch has no valid next-stack targets."
+        z = z[valid_mask]
+        z_quantized = z_quantized[valid_mask]
+        reconstructions = reconstructions[valid_mask]
+        target_observations = target_observations[valid_mask]
+        tokens = tokens[valid_mask]
 
         # Codebook loss. Notes:
         # - beta position is different from taming and identical to original VQVAE paper
         # - VQVAE uses 0.25 by default
         beta = 1.0
+        b = z.shape[0]
         z = z.reshape(b, -1)
         z_quantized = z_quantized.reshape(b, -1)
         commitment_loss = F.mse_loss(z_quantized, z.detach()) + beta * F.mse_loss(
             z, z_quantized.detach()
         )
 
+        channel_weights = torch.tensor(
+            [0.5, 0.5, 1.0], dtype=reconstructions.dtype, device=reconstructions.device
+        )
         if self.lpips is not None:
-            perceptual_loss = self.lpips(observations, reconstructions).flatten()
-            perceptual_loss = torch.mean(perceptual_loss)
+            perceptual_losses = []
+            for ch in range(3):
+                target_ch = target_observations[:, ch : ch + 1].repeat(1, 3, 1, 1)
+                recon_ch = reconstructions[:, ch : ch + 1].repeat(1, 3, 1, 1)
+                perceptual_losses.append(self.lpips(target_ch, recon_ch).flatten().mean())
+            perceptual_loss = (
+                torch.stack(perceptual_losses) * channel_weights
+            ).sum() / channel_weights.sum()
         else:
             perceptual_loss = torch.zeros_like(commitment_loss)
 
-        reconstruction_loss = F.mse_loss(observations, reconstructions)
+        per_channel_mse = (target_observations - reconstructions).pow(2).mean(
+            dim=(0, 2, 3)
+        )
+        reconstruction_loss = (
+            per_channel_mse * channel_weights
+        ).sum() / channel_weights.sum()
 
         with torch.no_grad():
             info = {

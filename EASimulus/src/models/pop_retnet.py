@@ -690,6 +690,48 @@ class POPRetNetDecoderLayer(yet_another_retnet.retnet.RetNetDecoderLayer):
             decay_scale_min_num_blocks=decay_scale_min_num_blocks,
             decay_scale_max_num_blocks=decay_scale_max_num_blocks
         )
+
+    @staticmethod
+    def _apply_adaln(normed: Tensor, adaln_params: Optional[Tensor], norm_idx: int) -> Tensor:
+        if adaln_params is None:
+            return normed
+        scale = adaln_params[:, :, norm_idx, 0]
+        shift = adaln_params[:, :, norm_idx, 1]
+        return normed * (1 + scale) + shift
+
+    def _retention_block(
+            self, x: Tensor, start_idx: Union[int, torch.LongTensor], prev_state: Optional[Tensor]
+    ) -> Tuple[Tensor, Tensor]:
+        y, state = self.retention.forward_chunkwise(
+            x, x, x, start_idx=start_idx, prev_state=prev_state
+        )
+        return self.dropout(y), state
+
+    def forward_chunkwise(
+            self,
+            x: Tensor,
+            start_idx: Union[int, torch.LongTensor],
+            prev_state: Optional[Tensor] = None,
+            adaln_params: Optional[Tensor] = None,
+    ) -> Tuple[Tensor, Tensor]:
+        if self.norm_first:
+            y, state = self._retention_block(
+                self._apply_adaln(self.norm1(x), adaln_params, 0),
+                start_idx,
+                prev_state,
+            )
+            x = x + y
+            x = x + self._feedforward_block(
+                self._apply_adaln(self.norm2(x), adaln_params, 1)
+            )
+        else:
+            y, state = self._retention_block(x, start_idx, prev_state)
+            x = self.norm1(x + y)
+            x = self._apply_adaln(x, adaln_params, 0)
+            x = self.norm2(x + self._feedforward_block(x))
+            x = self._apply_adaln(x, adaln_params, 1)
+        return x, state
+
     def _tokenfeedforward_block(self, x: Tensor) -> Tensor:
         if self._token_feedforward_alone:
             x = self.activation(self.tokenlinear1(x))
@@ -748,7 +790,11 @@ class POPRetNetDecoder(yet_another_retnet.retnet.RetNetDecoder):
         return x, x_pred_tokens, torch.stack(states)
 
     def forward_chunkwise(
-            self, x: Tensor, start_idx: Union[int, torch.LongTensor], prev_states: Sequence[Optional[Tensor]] = ()
+            self,
+            x: Tensor,
+            start_idx: Union[int, torch.LongTensor],
+            prev_states: Sequence[Optional[Tensor]] = (),
+            adaln_params: Optional[Sequence[Optional[Tensor]]] = None,
     ) -> Tuple[Tensor, Tensor]:
         if prev_states is None or len(prev_states) == 0:
             prev_states = [None] * self.num_layers
@@ -756,11 +802,13 @@ class POPRetNetDecoder(yet_another_retnet.retnet.RetNetDecoder):
             raise ValueError(
                 f"Expected {len(self.layers)} previous states, got {len(prev_states)}"
             )
+        if adaln_params is None:
+            adaln_params = [None] * self.num_layers
 
         states: List[Tensor] = []
-        for layer, prev_state in zip(self.layers, prev_states):
+        for layer, prev_state, layer_adaln in zip(self.layers, prev_states, adaln_params):
             assert isinstance(layer, POPRetNetDecoderLayer)
-            x, state = layer.forward_chunkwise(x, start_idx, prev_state)
+            x, state = layer.forward_chunkwise(x, start_idx, prev_state, layer_adaln)
             states.append(state)
         return x, torch.stack(states)
 

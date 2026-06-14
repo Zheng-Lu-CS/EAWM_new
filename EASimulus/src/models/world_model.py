@@ -533,6 +533,9 @@ class POPWorldModel(nn.Module):
         convmotdecoder=True,
         judge_tendency=False,
         reward_end_use_all_embedding=False,
+        use_dense_ssl: bool = True,
+        use_unchanged_patch_weighting: bool = False,
+        unchanged_patch_loss_weight: float = 0.2,
         device=None,
         *args,
         **kwargs,
@@ -567,8 +570,11 @@ class POPWorldModel(nn.Module):
         self._device = device
         self.event_pred = event_pred
         self.reward_end_use_all_embedding = reward_end_use_all_embedding
+        self.use_dense_ssl = use_dense_ssl
+        self.use_unchanged_patch_weighting = use_unchanged_patch_weighting
+        self.unchanged_patch_loss_weight = unchanged_patch_loss_weight
         print(
-            f"Event prediction is {event_pred}; GES is {ges}; convmotdecoder is {convmotdecoder}; reward_end_use_all_embedding is {reward_end_use_all_embedding}"
+            f"Event prediction is {event_pred}; GES is {ges}; convmotdecoder is {convmotdecoder}; reward_end_use_all_embedding is {reward_end_use_all_embedding}; dense_ssl is {use_dense_ssl}"
         )
         self.enable_curiosity = enable_curiosity
 
@@ -607,7 +613,9 @@ class POPWorldModel(nn.Module):
             if enable_curiosity
             else None
         )
-        if self.reward_end_use_all_embedding:
+        if self.use_dense_ssl:
+            self.input_dim_rewards_end = self.config.embed_dim
+        elif self.reward_end_use_all_embedding:
             self.input_dim_rewards_end = self.config.embed_dim * self.tokens_per_obs
         else:
             self.input_dim_rewards_end = self.config.embed_dim
@@ -643,10 +651,22 @@ class POPWorldModel(nn.Module):
         self.segment_lengths = [
             self.tokens_per_obs_dict[m] for m in self.ordered_modalities
         ]
-        self.segment_lengths.append(self.tokens_per_action)
-        self.placeholder_embeddings = nn.Embedding(
-            self.tokens_per_block, retnet_cfg.embed_dim, device=device
+        self.segment_lengths.append(1)
+        self.cls_embedding = nn.Parameter(
+            torch.zeros(1, 1, 1, retnet_cfg.embed_dim, device=device)
         )
+        self.image_pos_embedding = self._build_image_pos_embedding()
+        self.action_adaln = nn.Sequential(
+            nn.Linear(retnet_cfg.embed_dim, retnet_cfg.embed_dim * 4, device=device),
+            nn.SiLU(),
+            nn.Linear(
+                retnet_cfg.embed_dim * 4,
+                retnet_cfg.num_layers * 2 * 2 * retnet_cfg.embed_dim,
+                device=device,
+            ),
+        )
+        nn.init.zeros_(self.action_adaln[-1].weight)
+        nn.init.zeros_(self.action_adaln[-1].bias)
         self.compute_states_parallel = compute_states_parallel
         self.compute_states_parallel_inference = False
         self.pred_tokens_version = "shared" if shared_prediction_token else "per-token"
@@ -655,7 +675,7 @@ class POPWorldModel(nn.Module):
 
     @property
     def tokens_per_block(self) -> int:
-        return self.tokens_per_obs + self.tokens_per_action
+        return self.tokens_per_obs + 1
 
     @property
     def ordered_modalities(self) -> list[ObsModality]:
@@ -682,6 +702,16 @@ class POPWorldModel(nn.Module):
             return nn.Linear(
                 self.obs_emb_dim, self.config.embed_dim, device=self._device
             )
+
+    def _build_image_pos_embedding(self):
+        if ObsModality.image not in self.tokens_per_obs_dict:
+            return None
+        image_tokens = self.tokens_per_obs_dict[ObsModality.image]
+        pos = nn.Parameter(
+            torch.zeros(1, 1, image_tokens, self.config.embed_dim, device=self._device)
+        )
+        nn.init.trunc_normal_(pos, mean=0.0, std=0.02)
+        return pos
 
     def __repr__(self):
         return "world_model"
@@ -746,6 +776,8 @@ class POPWorldModel(nn.Module):
                 )
                 if self.obs_emb_map is not None:
                     img_tokens_emb = self.obs_emb_map(img_tokens_emb)
+                if self.image_pos_embedding is not None:
+                    img_tokens_emb = img_tokens_emb + self.image_pos_embedding
                 embs.append(img_tokens_emb)
             else:
                 tokens_emb = self.obs_embeddings[modality.name](obs_tokens[modality])
@@ -758,8 +790,31 @@ class POPWorldModel(nn.Module):
         )
         return obs_tokens_emb
 
+    def append_cls_token(self, obs_tokens_emb: Tensor) -> Tensor:
+        bsz, num_steps = obs_tokens_emb.shape[:2]
+        cls = self.cls_embedding.expand(bsz, num_steps, -1, -1)
+        return torch.cat([obs_tokens_emb, cls], dim=2)
+
     def embed_actions(self, actions: Tensor) -> Tensor:
         return self.action_encoder.embed_actions(actions)
+
+    def get_action_adaln_params(self, actions: Tensor) -> Tensor:
+        actions_emb = self.embed_actions(actions).mean(dim=2)
+        bsz, num_steps = actions_emb.shape[:2]
+        params = self.action_adaln(actions_emb)
+        return params.reshape(
+            bsz,
+            num_steps,
+            self.config.num_layers,
+            2,
+            2,
+            self.config.embed_dim,
+        )
+
+    def _expand_adaln_params(self, action_adaln: Tensor, start: int, stop: int):
+        chunk = action_adaln[:, start:stop]
+        chunk = chunk.repeat_interleave(self.tokens_per_block, dim=1)
+        return [chunk[:, :, layer_idx] for layer_idx in range(self.config.num_layers)]
 
     def get_tokens_emb(
         self, obs_tokens, actions, tokenizer: MultiModalTokenizer
@@ -768,35 +823,23 @@ class POPWorldModel(nn.Module):
         assert (
             obs_tokens_emb.dim() == 4
         ), f"Got {obs_tokens_emb.dim()} ({obs_tokens_emb.shape})"
-        actions_emb = self.embed_actions(actions)
-        assert actions_emb.dim() == 4, f"Got {actions_emb.dim()} ({actions_emb.shape})"
-        return torch.cat([obs_tokens_emb, actions_emb], dim=2)
+        return self.append_cls_token(obs_tokens_emb)
 
     def sample_rewards_ends(self, outputs) -> tuple[Tensor, Tensor]:
         k1 = self.tokens_per_block
         if outputs.dim() == 3:  # (b (t k1) e)
-            if outputs.shape[1] == k1 - self.tokens_per_action:
-                if self.reward_end_use_all_embedding:
-                    relevant_latents = rearrange(outputs, "b k e -> b 1 (k e)")
-                else:
-                    relevant_latents = rearrange(outputs[:, -1], "b e -> b 1 e")
-            else:
-                outputs_r = rearrange(outputs, "b (t k1) e -> b t k1 e", k1=k1)
-                if self.reward_end_use_all_embedding:
-                    relevant_latents = rearrange(
-                        outputs_r[:, :, : -self.tokens_per_action],
-                        "b t k e -> b t (k e)",
-                    )
-                else:
-                    relevant_latents = outputs_r[:, :, -self.tokens_per_action - 1]
-        else:
-            assert outputs.dim() == 4  # (b t k1 e)
-            if self.reward_end_use_all_embedding:
+            if outputs.shape[1] == self.tokens_per_obs:
+                relevant_latents = rearrange(outputs[:, -1], "b e -> b 1 e")
+            elif outputs.shape[1] == k1:
                 relevant_latents = rearrange(
-                    outputs[:, :, : -self.tokens_per_action], "b t k e -> b t (k e)"
+                    outputs[:, self.tokens_per_obs], "b e -> b 1 e"
                 )
             else:
-                relevant_latents = outputs[:, :, -self.tokens_per_action - 1]
+                outputs_r = rearrange(outputs, "b (t k1) e -> b t k1 e", k1=k1)
+                relevant_latents = outputs_r[:, :, self.tokens_per_obs]
+        else:
+            assert outputs.dim() == 4  # (b t k1 e)
+            relevant_latents = outputs[:, :, self.tokens_per_obs]
 
         rewards = self.head_rewards(relevant_latents)
         ends_logits = self.head_ends(relevant_latents)
@@ -807,6 +850,7 @@ class POPWorldModel(nn.Module):
     def forward(
         self,
         tokens_emb: torch.FloatTensor,
+        actions: Optional[Tensor] = None,
         recurrent_state: Optional[RecurrentState] = None,
     ):
         assert (
@@ -818,16 +862,18 @@ class POPWorldModel(nn.Module):
             initial_state = self.get_empty_state()
 
         assert isinstance(self._model, POPRetNetDecoder)
+        action_adaln = self.get_action_adaln_params(actions) if actions is not None else None
 
         if self.compute_states_parallel:
-            return self._compute_train_forward_parallel(tokens_emb, initial_state)
+            return self._compute_train_forward_parallel(tokens_emb, initial_state, action_adaln)
         else:
-            return self._compute_train_forward_sequential(tokens_emb, initial_state)
+            return self._compute_train_forward_sequential(tokens_emb, initial_state, action_adaln)
 
     @torch.no_grad()
     def forward_inference(
         self,
         tokens_emb: torch.FloatTensor,
+        actions: Optional[Tensor] = None,
         recurrent_state: Optional[RecurrentState] = None,
     ):
         assert isinstance(self._model, POPRetNetDecoder)
@@ -838,8 +884,14 @@ class POPWorldModel(nn.Module):
         assert tokens_emb.shape[1] > 1, "unsupported length!"
 
         if not self.compute_states_parallel_inference:
+            action_adaln = self.get_action_adaln_params(actions) if actions is not None else None
+            adaln_params = (
+                self._expand_adaln_params(action_adaln, 0, action_adaln.shape[1])
+                if action_adaln is not None
+                else None
+            )
             outs, recurrent_state.state = self._model.forward_chunkwise(
-                tokens_emb, recurrent_state.n, recurrent_state.state
+                tokens_emb, recurrent_state.n, recurrent_state.state, adaln_params
             )
         else:
             raise NotImplementedError("Not yet implemented.")
@@ -848,36 +900,32 @@ class POPWorldModel(nn.Module):
         return outs
 
     def _compute_train_forward_sequential(
-        self, tokens_emb, initial_state: Optional[RecurrentState]
+        self, tokens_emb, initial_state: Optional[RecurrentState], action_adaln: Optional[Tensor]
     ):
         bsz, num_steps = tokens_emb.shape[:2]
-        pred_tokens_emb = self._get_prediction_tokens_embeddings(
-            bsz, 1, tokens_emb.device, obs_only=True
-        )
         outputs = []
 
         for t in range(num_steps):
-            pred_outs, _ = self._model.forward_chunkwise(
-                pred_tokens_emb, initial_state.n, initial_state.state
-            )
-            outputs.append(pred_outs)
-
             tokens_emb_t = tokens_emb[:, t]
+            layer_adaln = (
+                self._expand_adaln_params(action_adaln, t, t + 1)
+                if action_adaln is not None
+                else None
+            )
             step_outs, initial_state.state = self._model.forward_chunkwise(
-                tokens_emb_t, initial_state.n, initial_state.state
+                tokens_emb_t, initial_state.n, initial_state.state, layer_adaln
             )
 
             initial_state.n += tokens_emb_t.shape[1]
-            outputs.append(step_outs[:, -1:])
+            outputs.append(step_outs)
             assert tokens_emb_t.shape[1] == self.tokens_per_block
 
         return torch.cat(outputs, dim=1)
 
     def _compute_train_forward_parallel(
-        self, tokens_emb, initial_state: Optional[RecurrentState]
+        self, tokens_emb, initial_state: Optional[RecurrentState], action_adaln: Optional[Tensor]
     ):
-        bsz, num_steps = tokens_emb.shape[:2]
-        n_action_tokens = self.tokens_per_action
+        num_steps = tokens_emb.shape[1]
 
         blocks_per_chunk = self.config.blocks_per_chunk
         n_chunks = ceil(num_steps / blocks_per_chunk)
@@ -887,77 +935,32 @@ class POPWorldModel(nn.Module):
                 (i + 1) * blocks_per_chunk, num_steps
             )
             tokens_emb_i = tokens_emb[:, start:stop].flatten(1, 2)
-
-            pred_tokens_emb = self._get_prediction_tokens_embeddings(
-                bsz, stop - start, tokens_emb.device, obs_only=True
-            )
-            pred_tokens_emb = rearrange(
-                pred_tokens_emb,
-                "b (t k) e -> b t k e",
-                t=stop - start,
-                k=self.tokens_per_obs,
+            layer_adaln = (
+                self._expand_adaln_params(action_adaln, start, stop)
+                if action_adaln is not None
+                else None
             )
 
-            tokens_outs, pred_tokens_outs, state = self._model.pop_forward(
+            tokens_outs, state = self._model.forward_chunkwise(
                 tokens_emb_i,
-                x_pred_tokens=pred_tokens_emb,
                 start_idx=initial_state.n,
                 prev_states=initial_state.state,
+                adaln_params=layer_adaln,
             )
 
-            # pred_tokens_outs = rearrange(pred_tokens_outs, 'b (t k1) d -> b t k1 d', k1=self.tokens_per_block)
-            tokens_outs = rearrange(
-                tokens_outs, "b (t k1) d -> b t k1 d", k1=self.tokens_per_block
-            )
-            pred_tokens_outs = torch.cat(
-                [pred_tokens_outs, tokens_outs[:, :, -n_action_tokens:]], dim=2
-            )
-            assert (
-                pred_tokens_outs.shape[2] == self.tokens_per_block
-            ), f"got {pred_tokens_outs.shape[2]} instead of {self.tokens_per_block}"
-
-            pred_tokens_outs = rearrange(pred_tokens_outs, "b t k1 d -> b (t k1) d")
-            outs.append(pred_tokens_outs)
+            outs.append(tokens_outs)
 
             initial_state.state = state
             initial_state.n += tokens_emb_i.shape[1]
         return torch.cat(outs, dim=1)
 
     def compute_next_obs_pred_latents(self, recurrent_state: RecurrentState):
-        assert recurrent_state is not None and isinstance(
-            recurrent_state, RecurrentState
-        )
-        assert len(recurrent_state.state) > 0 and recurrent_state.state[0] is not None
-        batch_size = recurrent_state.state[0].shape[0]
-        device = recurrent_state.state[0].device
-        pred_tokens_emb = self._get_prediction_tokens_embeddings(
-            batch_size, 1, device, obs_only=True
-        )
-
-        return self._model.forward_chunkwise(
-            pred_tokens_emb, recurrent_state.n, recurrent_state.state
-        )
+        raise RuntimeError("Dense SSL world model does not use POP prediction tokens.")
 
     def _get_prediction_tokens_embeddings(
         self, batch_size: int, num_steps: int, device, obs_only: bool = False
     ):
-        num_tokens = self.tokens_per_block if not obs_only else self.tokens_per_obs
-        if self.pred_tokens_version == "shared":
-            return self.placeholder_embeddings(
-                torch.zeros(batch_size, num_steps * num_tokens, device=device).long()
-            )
-        elif self.pred_tokens_version == "per-token":
-            tokens = torch.arange(num_tokens, device=device)
-            tokens = (
-                rearrange(tokens, "k1 -> 1 1 k1")
-                .expand(batch_size, num_steps, -1)
-                .flatten(1, 2)
-            )
-            return self.placeholder_embeddings(tokens)
-        else:
-            raise ValueError(
-                f"Pred tokens version '{self.pred_tokens_version}' not supported."
-            )
+        raise RuntimeError("POP prediction-token embeddings are disabled in dense SSL mode.")
 
     def compute_loss(
         self, batch: Batch, tokenizer: MultiModalTokenizer, **kwargs: Any
@@ -967,16 +970,22 @@ class POPWorldModel(nn.Module):
             obs_tokens, batch["actions"], tokenizer=tokenizer
         )
 
-        outputs = self(tokens_emb)
-        loss_obs, obs_per_sample_loss, curiosity_loss = (
+        outputs = self(tokens_emb, actions=batch["actions"])
+        loss_obs, obs_per_sample_loss, curiosity_loss, dense_stats = (
             self.get_next_token_logits_and_labels(
-                outputs, obs_tokens, batch["mask_padding"]
+                outputs,
+                obs_tokens,
+                batch["mask_padding"],
+                batch["observations"],
             )
         )
         loss_rewards, loss_ends, reward_per_sample_loss = self.get_rewards_ends_losses(
             outputs, batch["mask_padding"], batch["rewards"], batch["ends"]
         )
-        info = {"per_sample_loss": obs_per_sample_loss + reward_per_sample_loss}
+        info = {
+            "per_sample_loss": obs_per_sample_loss + reward_per_sample_loss,
+            **dense_stats,
+        }
         losses = {
             "loss_obs": loss_obs,
             "loss_rewards": loss_rewards,
@@ -1065,41 +1074,116 @@ class POPWorldModel(nn.Module):
         per_sample_loss = torch.stack([l_i.mean() for l_i in per_sample_loss]).flatten()
         return loss_mots, per_sample_loss, events_percents_dict
 
+    def _compute_dense_patch_weights(
+        self, image_obs: Tensor, pred_mask: Tensor
+    ) -> tuple[Tensor, dict]:
+        bsz, seq_len, channels, height, width = image_obs.shape
+        assert channels == 3, f"Expected temporal grayscale stack with 3 channels, got {channels}"
+        image_tokens = self.tokens_per_obs_dict[ObsModality.image]
+        grid_h = int(np.sqrt(image_tokens * height / width))
+        grid_w = image_tokens // grid_h
+        assert grid_h * grid_w == image_tokens
+        assert height % grid_h == 0 and width % grid_w == 0
+        patch_h, patch_w = height // grid_h, width // grid_w
+
+        frames = torch.stack(
+            [
+                image_obs[:, :-1, 0],
+                image_obs[:, :-1, 1],
+                image_obs[:, :-1, 2],
+                image_obs[:, 1:, 2],
+            ],
+            dim=2,
+        )
+        unchanged_pixels = (frames == frames[:, :, :1]).all(dim=2)
+        unchanged_patches = rearrange(
+            unchanged_pixels,
+            "b t (gh ph) (gw pw) -> b t (gh gw) (ph pw)",
+            gh=grid_h,
+            gw=grid_w,
+            ph=patch_h,
+            pw=patch_w,
+        ).all(dim=-1)
+        unchanged = unchanged_patches[pred_mask]
+        changed = torch.logical_not(unchanged)
+        weights = torch.ones_like(unchanged, dtype=image_obs.dtype)
+        if weights.numel() == 0:
+            zero = torch.zeros((), dtype=image_obs.dtype, device=image_obs.device)
+            return weights, {
+                "dense_changed_patch_fraction": zero.detach(),
+                "dense_unchanged_patch_fraction": zero.detach(),
+                "dense_changed_patch_count": zero.detach(),
+                "dense_unchanged_patch_count": zero.detach(),
+                "dense_mean_patch_loss_weight": zero.detach(),
+                "dense_patch_count": zero.detach(),
+            }
+        if self.use_unchanged_patch_weighting:
+            weights = torch.where(
+                unchanged,
+                torch.full_like(weights, self.unchanged_patch_loss_weight),
+                weights,
+            )
+        total = torch.clamp(torch.tensor(weights.numel(), device=image_obs.device), min=1)
+        stats = {
+            "dense_changed_patch_fraction": changed.float().mean().detach(),
+            "dense_unchanged_patch_fraction": unchanged.float().mean().detach(),
+            "dense_changed_patch_count": changed.float().sum().detach(),
+            "dense_unchanged_patch_count": unchanged.float().sum().detach(),
+            "dense_mean_patch_loss_weight": weights.mean().detach(),
+            "dense_patch_count": total.float().detach(),
+        }
+        return weights, stats
+
     def get_next_token_logits_and_labels(
         self,
         outputs: Tensor,
         obs_tokens: dict[ObsModality, Tensor],
         mask_padding: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor]:
-        pred_mask = mask_padding.clone()
-        pred_mask[:, : self.context_length] = 0
+        raw_observations: MultiModalObs,
+    ) -> tuple[Tensor, Tensor, Tensor, dict]:
+        pred_mask = torch.logical_and(mask_padding[:, :-1], mask_padding[:, 1:])
+        if self.context_length > 1:
+            pred_mask[:, : self.context_length - 1] = 0
 
-        labels = [obs_tokens[m][pred_mask].flatten() for m in self.ordered_modalities]
+        labels = [
+            obs_tokens[m][:, 1:][pred_mask].flatten()
+            for m in self.ordered_modalities
+        ]
         outputs = rearrange(outputs, "b (t k) e -> b t k e", k=self.tokens_per_block)
         segmented_outputs = torch.split(outputs, self.segment_lengths, dim=2)[
             :-1
-        ]  # discard the outputs of action tokens
+        ]  # discard CLS token
         logits = [
-            self.head_observations[m.name](o_m[pred_mask]).flatten(0, 1)
+            self.head_observations[m.name](o_m[:, :-1][pred_mask]).flatten(0, 1)
             for m, o_m in zip(self.ordered_modalities, segmented_outputs)
         ]
 
-        loss_obs = torch.cat(
-            [
-                modality_to_obs_loss[self.ordered_modalities[i]](
-                    logits[i],
-                    labels[i],
-                    self.obs_vocab_size[self.ordered_modalities[i]],
-                    reduction="none",
-                ).reshape(-1, self.segment_lengths[i])
-                for i in range(len(self.segment_lengths) - 1)
-            ],
-            dim=1,
-        )
+        per_modality_losses = []
+        dense_stats = {}
+        for i in range(len(self.segment_lengths) - 1):
+            modality = self.ordered_modalities[i]
+            losses_i = modality_to_obs_loss[modality](
+                logits[i],
+                labels[i],
+                self.obs_vocab_size[modality],
+                reduction="none",
+            ).reshape(-1, self.segment_lengths[i])
+            if modality == ObsModality.image:
+                patch_weights, dense_stats = self._compute_dense_patch_weights(
+                    raw_observations[ObsModality.image], pred_mask
+                )
+                assert patch_weights.shape == losses_i.shape, (
+                    patch_weights.shape,
+                    losses_i.shape,
+                )
+                losses_i = losses_i * patch_weights
+            per_modality_losses.append(losses_i)
+
+        loss_obs = torch.cat(per_modality_losses, dim=1)
 
         if self.enable_curiosity:
             curiosity_logits = [
-                self.curiosity_head[m.name](o_m.detach())[pred_mask].flatten(0, -2)
+                self.curiosity_head[m.name](o_m[:, :-1].detach())[pred_mask].flatten(0, -2)
                 for m, o_m in zip(self.ordered_modalities, segmented_outputs)
             ]
             curiosity_loss = torch.stack(
@@ -1118,58 +1202,63 @@ class POPWorldModel(nn.Module):
 
         per_sample_counts = pred_mask.sum(dim=1).tolist()
         per_sample_loss = torch.split(loss_obs.detach(), per_sample_counts, dim=0)
-        per_sample_loss = torch.stack([l_i.mean() for l_i in per_sample_loss]).flatten()
+        per_sample_loss = torch.stack(
+            [
+                l_i.mean()
+                if l_i.numel() > 0
+                else torch.zeros((), device=loss_obs.device)
+                for l_i in per_sample_loss
+            ]
+        ).flatten()
 
-        return loss_obs.mean(), per_sample_loss, curiosity_loss
+        return loss_obs.mean(), per_sample_loss, curiosity_loss, dense_stats
 
     def get_rewards_ends_losses(
         self, outputs: Tensor, mask_padding: Tensor, rewards, ends
     ) -> tuple[Tensor, Tensor, Tensor]:
-        relevant_elements_mask = torch.logical_and(
-            mask_padding[:, :-1], mask_padding[:, 1:]
-        )
-        relevant_labels_mask = F.pad(relevant_elements_mask, (0, 1), value=0)
-        relevant_latents_mask = F.pad(relevant_elements_mask, (1, 0), value=0)
+        relevant_mask = torch.logical_and(mask_padding[:, :-1], mask_padding[:, 1:])
+        if self.context_length > 1:
+            relevant_mask[:, : self.context_length - 1] = 0
 
-        # relevant_elements_mask[:, :self.context_length] = 0
         outputs_r = rearrange(
             outputs, "b (t k1) e -> b t k1 e", k1=self.tokens_per_block
         )
-        if self.reward_end_use_all_embedding:
-            latents = rearrange(
-                outputs_r[:, :, : -self.tokens_per_action], "b t k e -> b t (k e)"
-            )
-        else:
-            latents = outputs_r[:, :, -self.tokens_per_action - 1]
-        # predicted_rewards = self.head_rewards(latents[torch.where(relevant_latents_mask)]).flatten()
+        latents = outputs_r[:, :-1, self.tokens_per_obs]
         ends_logits = self.head_ends(latents.flatten(0, 1))
 
-        mask_fill = torch.logical_not(relevant_labels_mask)
+        mask_fill = torch.logical_not(relevant_mask)
         ignore_value = -100
-        rewards_labels = rewards[torch.where(relevant_labels_mask)]
-        ends_labels = ends.masked_fill(mask_fill, ignore_value).flatten()
+        rewards_labels = rewards[:, :-1][torch.where(relevant_mask)]
+        ends_labels = ends[:, :-1].masked_fill(mask_fill, ignore_value).flatten()
 
         reward_latents = self.head_rewards.model(
-            latents[torch.where(relevant_latents_mask)]
+            latents[torch.where(relevant_mask)]
         )
         loss_rewards = self.head_rewards.head.compute_loss(
             reward_latents, rewards_labels, reduction="none"
         )
         loss_ends = F.cross_entropy(ends_logits, ends_labels)
 
-        per_sample_losses_count = relevant_latents_mask.flatten(1).sum(dim=1).tolist()
+        per_sample_losses_count = relevant_mask.flatten(1).sum(dim=1).tolist()
         per_sample_losses = torch.split(loss_rewards.detach(), per_sample_losses_count)
         per_sample_losses = torch.stack(
-            [l_i.mean() for l_i in per_sample_losses]
+            [
+                l_i.mean()
+                if l_i.numel() > 0
+                else torch.zeros((), device=loss_rewards.device)
+                for l_i in per_sample_losses
+            ]
         ).flatten()
 
         return loss_rewards.mean(), loss_ends, per_sample_losses
 
     @property
     def uses_pop(self) -> bool:
-        return True
+        return False
 
     def sample_obs_tokens(self, outputs) -> dict[ObsModality, Tensor]:
+        if outputs.shape[1] == self.tokens_per_block:
+            outputs = outputs[:, : self.tokens_per_obs]
         assert outputs.shape[1] == self.tokens_per_obs
         outputs = torch.split(
             outputs,
