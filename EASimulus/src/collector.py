@@ -25,8 +25,13 @@ import cv2
 
 class Collector:
     def __init__(
-            self, env: Union[SingleProcessEnv, MultiProcessEnv], dataset: EpisodesDataset,
-            episode_dir_manager: EpisodeDirManager, event_pred= False, judge_tendency= False, tend_threshold=0.0001
+            self,
+            env: Union[SingleProcessEnv, MultiProcessEnv], 
+            dataset: EpisodesDataset,
+            episode_dir_manager: EpisodeDirManager, 
+            event_pred= False, 
+            judge_tendency= False, 
+            tend_threshold=0.0001
     ) -> None:
         self.env = env
         self.dataset = dataset
@@ -37,12 +42,13 @@ class Collector:
         self.event_pred=event_pred
         self.judge_tendency=judge_tendency
         print(f"self.obs.keys():{self.obs.keys()}")
-        for k,v in self.obs.items():
+        for k,v in self.obs.items():#这里传入的tensor是什么
             print(f"{k} obs.shape:{v.shape}")
         if self.event_pred:
             self.reset_event()
         self.heuristic = (ContinuousRandomHeuristic(action_space)
-                          if isinstance(action_space, Box) else DiscreteRandomHeuristic(action_space))
+                          if isinstance(action_space, Box) 
+                          else DiscreteRandomHeuristic(action_space))
         self.obs_processors = {m: get_obs_processor(m) for m in env.modalities}
         if ObsModality.vector in self.env.observation_space.keys() and judge_tendency:
             self.vector_change_threshold=tend_threshold
@@ -60,7 +66,18 @@ class Collector:
         return processed_obs
 
     @torch.no_grad()
-    def collect(self, agent: Agent, epoch: int, epsilon: float, should_sample: bool, temperature: float, burn_in: int, *, num_steps: Optional[int] = None, num_episodes: Optional[int] = None):
+    def collect(
+        self, 
+        agent: Agent, 
+        epoch: int, 
+        epsilon: float, 
+        should_sample: bool, 
+        temperature: float, 
+        burn_in: int, 
+        *, 
+        num_steps: Optional[int] = None, 
+        num_episodes: Optional[int] = None
+    ):
         # assert self.env.num_actions == agent.world_model.act_vocab_size
         assert 0 <= epsilon <= 1
 

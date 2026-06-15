@@ -142,6 +142,26 @@ task_log_dir() {
   echo "${LOG_ROOT}/${game_short}"
 }
 
+checkpoint_top_level_loadable() {
+  local run_dir="$1"
+  python - "${run_dir}" <<'PY'
+from pathlib import Path
+import sys
+import torch
+
+run_dir = Path(sys.argv[1])
+for name in ("run_metadata.pt", "last.pt", "optimizer.pt", "num_seen_episodes_test_dataset.pt"):
+    path = run_dir / "checkpoints" / name
+    if not path.is_file():
+        sys.exit(1)
+    try:
+        torch.load(path, map_location="cpu", weights_only=False)
+    except Exception:
+        sys.exit(1)
+sys.exit(0)
+PY
+}
+
 repair_interrupted_checkpoint() {
   local run_dir="$1"
   local tmp_dir="${run_dir}/checkpoints_tmp"
@@ -151,6 +171,12 @@ repair_interrupted_checkpoint() {
   fi
 
   echo "[train][resume] found interrupted checkpoint save: ${tmp_dir}" >&2
+  if checkpoint_top_level_loadable "${run_dir}"; then
+    echo "[train][resume] current checkpoint is loadable; keeping it and archiving checkpoints_tmp" >&2
+    mv "${tmp_dir}" "${run_dir}/checkpoints_tmp.valid_current_${TIMESTAMP}" 2>/dev/null || true
+    return 0
+  fi
+
   mkdir -p "${ckpt_dir}"
   local item
   for item in last.pt best.pt run_metadata.pt optimizer.pt num_seen_episodes_test_dataset.pt "${ARCH_MARKER_FILE}"; do

@@ -26,6 +26,12 @@ from utils.preprocessing import ImageObsProcessor, TokenObsProcessor, VectorObsP
 Batch = Dict[str, Union[torch.Tensor, MultiModalObs]]
 
 
+def atomic_torch_save(obj, path: Path) -> None:
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    torch.save(obj, tmp_path)
+    os.replace(tmp_path, path)
+
+
 class EpisodesDataset:
     def __init__(
         self,
@@ -252,9 +258,9 @@ class EpisodesDataset:
         assert directory.is_dir()
         for episode_id in self.newly_modified_episodes:
             episode = self.get_episode(episode_id)
-            episode.save(directory / f"{episode_id}.pt")
+            atomic_torch_save(episode.to_dict(), directory / f"{episode_id}.pt")
         for episode_id in self.newly_deleted_episodes:
-            (directory / f"{episode_id}.pt").unlink()
+            (directory / f"{episode_id}.pt").unlink(missing_ok=True)
         self.newly_modified_episodes, self.newly_deleted_episodes = set(), set()
 
     def load_disk_checkpoint(self, directory: Path) -> None:

@@ -72,6 +72,29 @@ CHECKPOINT_ARCHITECTURE_TAG = os.environ.get("EASIMULUS_ARCH_TAG", "easimulus_de
 CHECKPOINT_ARCHITECTURE_FILE = "architecture.txt"
 
 
+def atomic_torch_save(obj: Any, path: Path) -> None:
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    torch.save(obj, tmp_path)
+    os.replace(tmp_path, path)
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    tmp_path.write_text(text, encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
+def can_load_checkpoint_file(path: Path, map_location: str = "cpu") -> bool:
+    if not path.is_file():
+        return False
+    try:
+        torch.load(path, map_location=map_location, weights_only=False)
+        return True
+    except Exception as exc:
+        logger.warning(f"Checkpoint file is not loadable: {path} ({exc})")
+        return False
+
+
 class RunMetadata:
     def __init__(
         self,
@@ -887,11 +910,10 @@ class Trainer:
         return to_log
 
     def _save_checkpoint(self, save_agent_only: bool) -> None:
-        torch.save(self.agent.state_dict(), self.ckpt_dir / "last.pt")
+        atomic_torch_save(self.agent.state_dict(), self.ckpt_dir / "last.pt")
         if self.run_metadata.is_current_epoch_best:
-            torch.save(self.agent.state_dict(), self.ckpt_dir / "best.pt")
+            atomic_torch_save(self.agent.state_dict(), self.ckpt_dir / "best.pt")
         if not save_agent_only:
-            torch.save(self.run_metadata.to_dict(), self.ckpt_dir / "run_metadata.pt")
             optimizers_states_dict = {
                 "optimizer_world_model": self.optimizer_world_model.state_dict(),
                 "optimizer_actor_critic": self.optimizer_actor_critic.state_dict(),
@@ -900,7 +922,7 @@ class Trainer:
                 optimizers_states_dict["optimizer_tokenizer"] = (
                     self.optimizer_tokenizer.state_dict()
                 )
-            torch.save(optimizers_states_dict, self.ckpt_dir / "optimizer.pt")
+            atomic_torch_save(optimizers_states_dict, self.ckpt_dir / "optimizer.pt")
             ckpt_dataset_dir = self.ckpt_dir / "dataset"
             ckpt_dataset_dir.mkdir(exist_ok=True, parents=False)
             self.train_dataset.update_disk_checkpoint(ckpt_dataset_dir)
@@ -909,26 +931,94 @@ class Trainer:
                     test_dataset_dir = self.ckpt_dir / "test_dataset"
                     test_dataset_dir.mkdir(exist_ok=True, parents=False)
                     self.test_dataset.update_disk_checkpoint(test_dataset_dir)
-                torch.save(
+                atomic_torch_save(
                     self.test_dataset.num_seen_episodes,
                     self.ckpt_dir / "num_seen_episodes_test_dataset.pt",
                 )
-            (self.ckpt_dir / CHECKPOINT_ARCHITECTURE_FILE).write_text(
-                f"{CHECKPOINT_ARCHITECTURE_TAG}\n", encoding="utf-8"
+            atomic_write_text(
+                self.ckpt_dir / CHECKPOINT_ARCHITECTURE_FILE,
+                f"{CHECKPOINT_ARCHITECTURE_TAG}\n",
+            )
+            # Metadata is saved last: a resumed run only advances to the next epoch
+            # after weights, optimizer state, and replay data have all been written.
+            atomic_torch_save(
+                self.run_metadata.to_dict(), self.ckpt_dir / "run_metadata.pt"
             )
 
     def save_checkpoint(self, save_agent_only: bool) -> None:
         tmp_checkpoint_dir = Path("checkpoints_tmp")
+        if tmp_checkpoint_dir.exists():
+            repaired_dir = Path(f"checkpoints_tmp.stale_{int(time.time())}")
+            logger.warning(
+                f"Found stale checkpoint backup at {tmp_checkpoint_dir}; moving it to {repaired_dir}."
+            )
+            shutil.move(str(tmp_checkpoint_dir), str(repaired_dir))
         shutil.copytree(
             src=self.ckpt_dir,
             dst=tmp_checkpoint_dir,
             ignore=shutil.ignore_patterns("dataset"),
         )
-        self._save_checkpoint(save_agent_only)
-        shutil.rmtree(tmp_checkpoint_dir)
+        try:
+            self._save_checkpoint(save_agent_only)
+        except Exception:
+            logger.exception(
+                "Checkpoint save failed; restoring previous top-level checkpoint files."
+            )
+            self._restore_checkpoint_backup(tmp_checkpoint_dir)
+            raise
+        else:
+            shutil.rmtree(tmp_checkpoint_dir)
+
+    def _top_level_checkpoint_files(self) -> Tuple[str, ...]:
+        return (
+            "last.pt",
+            "best.pt",
+            "run_metadata.pt",
+            "optimizer.pt",
+            "num_seen_episodes_test_dataset.pt",
+            CHECKPOINT_ARCHITECTURE_FILE,
+        )
+
+    def _restore_checkpoint_backup(self, backup_dir: Path) -> None:
+        if not backup_dir.is_dir():
+            return
+        self.ckpt_dir.mkdir(exist_ok=True, parents=False)
+        for name in self._top_level_checkpoint_files():
+            src = backup_dir / name
+            if src.is_file():
+                shutil.copy2(src, self.ckpt_dir / name)
+
+    def _current_checkpoint_is_loadable(self) -> bool:
+        required = [self.ckpt_dir / "run_metadata.pt", self.ckpt_dir / "last.pt"]
+        if not self.cfg.common.metrics_only_mode:
+            required.append(self.ckpt_dir / "optimizer.pt")
+            if self.cfg.evaluation.should:
+                required.append(self.ckpt_dir / "num_seen_episodes_test_dataset.pt")
+        return all(can_load_checkpoint_file(path) for path in required)
+
+    def repair_interrupted_checkpoint_save(self) -> None:
+        backup_dir = Path("checkpoints_tmp")
+        if not backup_dir.is_dir():
+            return
+        if self._current_checkpoint_is_loadable():
+            archive_dir = Path(f"checkpoints_tmp.valid_current_{int(time.time())}")
+            logger.warning(
+                f"Found leftover checkpoint backup at {backup_dir}, but current checkpoint is loadable; "
+                f"archiving backup to {archive_dir}."
+            )
+            shutil.move(str(backup_dir), str(archive_dir))
+            return
+
+        logger.warning(
+            f"Found interrupted checkpoint save at {backup_dir}; restoring previous checkpoint files."
+        )
+        self._restore_checkpoint_backup(backup_dir)
+        archive_dir = Path(f"checkpoints_tmp.restored_{int(time.time())}")
+        shutil.move(str(backup_dir), str(archive_dir))
 
     def load_checkpoint(self) -> None:
         assert self.ckpt_dir.is_dir()
+        self.repair_interrupted_checkpoint_save()
         run_metadata_dict = torch.load(self.ckpt_dir / "run_metadata.pt")
         self.run_metadata = RunMetadata(**run_metadata_dict)
         self.start_epoch = self.run_metadata.epoch + 1
