@@ -153,7 +153,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 modules = [
     "torch", "torchvision", "hydra", "omegaconf", "einops", "wandb",
-    "numpy", "PIL", "imageio", "cv2", "pygame", "jax", "gymnax", "craftax",
+    "numpy", "PIL", "imageio", "cv2", "pygame", "dm_env", "jax", "gymnax", "craftax",
 ]
 for name in modules:
     importlib.import_module(name)
@@ -217,7 +217,7 @@ python -m pip install \
   torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
   --index-url https://download.pytorch.org/whl/cu124
 
-echo "[setup-craftax] Installing Craftax-only EASimulus dependencies."
+echo "[setup-craftax] Installing Craftax runtime dependencies plus official EASimulus import-time dependencies."
 python -m pip install \
   "numpy==1.25.2" \
   "einops==0.8.0" \
@@ -232,6 +232,7 @@ python -m pip install \
   "nltk==3.8.1" \
   "loguru" \
   "yet-another-retnet>=0.5.0" \
+  "dm-env==1.6" \
   "imageio[ffmpeg]" \
   "scipy" \
   "jax[cpu]" \

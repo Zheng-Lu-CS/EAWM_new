@@ -98,7 +98,7 @@ import importlib
 import sys
 import torch
 
-for name in ["torch", "torchvision", "hydra", "omegaconf", "jax", "gymnax", "craftax", "PIL", "imageio"]:
+for name in ["torch", "torchvision", "hydra", "omegaconf", "dm_env", "jax", "gymnax", "craftax", "PIL", "imageio"]:
     importlib.import_module(name)
     print(f"[runtime] imported {name}")
 print(f"[runtime] python={sys.version}")
