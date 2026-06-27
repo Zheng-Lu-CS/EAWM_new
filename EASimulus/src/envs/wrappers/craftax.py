@@ -17,9 +17,20 @@ os.environ['JAX_PLATFORMS'] = 'cpu'
 def make_craftax(id: str = "Craftax-Symbolic-v1",tokenizer_config=None):
     from craftax.craftax_env import make_craftax_env_from_name
     from gymnax.wrappers import GymnaxToGymWrapper
+    from gymnax.environments import spaces
 
     env = make_craftax_env_from_name(id, auto_reset=True)
-    env = GymnaxToGymWrapper(env)
+
+    class CraftaxGymnaxToGymWrapper(GymnaxToGymWrapper):
+        @property
+        def action_space(self):
+            raw_space = self._env.action_space(self.env_params)
+            n = _get_discrete_size(raw_space)
+            if n is not None:
+                return gymnasium.spaces.Discrete(n)
+            return spaces.gymnax_space_to_gym_space(raw_space)
+
+    env = CraftaxGymnaxToGymWrapper(env)
     env = CraftaxWrapper(env)
     env = InfoWrapper(env)
     env = MultiModalObsWrapper(env, obs_key_to_modality={
@@ -29,6 +40,23 @@ def make_craftax(id: str = "Craftax-Symbolic-v1",tokenizer_config=None):
     })
 
     return env
+
+
+def _get_discrete_size(space) -> int | None:
+    for attr in ("n", "num_categories", "num_actions"):
+        value = getattr(space, attr, None)
+        if value is not None:
+            return int(value)
+
+    if space.__class__.__name__ == "Discrete":
+        try:
+            from craftax.craftax.play_craftax import Action
+
+            return len(Action)
+        except Exception:
+            return None
+
+    return None
 
 
 class CraftaxWrapper(gymnasium.ObservationWrapper):
