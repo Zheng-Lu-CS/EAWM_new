@@ -164,6 +164,28 @@ if not torch.cuda.is_available():
     raise RuntimeError("torch.cuda.is_available() is False")
 print(f"[smoke] CUDA OK: {torch.cuda.device_count()} visible device(s)")
 
+import gymnasium
+from gymnax.environments import spaces as gymnax_spaces
+original_gymnax_space_to_gym_space = gymnax_spaces.gymnax_space_to_gym_space
+def patched_gymnax_space_to_gym_space(space):
+    try:
+        return original_gymnax_space_to_gym_space(space)
+    except NotImplementedError:
+        if space.__class__.__name__ != "Discrete":
+            raise
+        n = getattr(space, "n", None)
+        if n is None:
+            n = getattr(space, "num_categories", None)
+        if n is None:
+            n = getattr(space, "num_values", None)
+        if n is None:
+            raise
+        if hasattr(n, "item"):
+            n = n.item()
+        return gymnasium.spaces.Discrete(int(n))
+gymnax_spaces.gymnax_space_to_gym_space = patched_gymnax_space_to_gym_space
+print("[smoke] patched gymnax Discrete -> gymnasium Discrete conversion")
+
 from envs.wrappers.craftax import make_craftax
 env = make_craftax("Craftax-Symbolic-v1")
 obs, info = env.reset()

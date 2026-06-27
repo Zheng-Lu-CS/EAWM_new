@@ -63,6 +63,36 @@ def build_cfg(easimulus_dir: Path, seed: int):
     return cfg
 
 
+def patch_gymnax_discrete_space_conversion() -> None:
+    """Gymnax versions around the Craftax release miss Discrete -> Gym conversion."""
+    import gymnasium
+    from gymnax.environments import spaces as gymnax_spaces
+
+    original = gymnax_spaces.gymnax_space_to_gym_space
+    if getattr(original, "_eawm_craftax_discrete_patch", False):
+        return
+
+    def patched(space):
+        try:
+            return original(space)
+        except NotImplementedError:
+            if space.__class__.__name__ != "Discrete":
+                raise
+            n = getattr(space, "n", None)
+            if n is None:
+                n = getattr(space, "num_categories", None)
+            if n is None:
+                n = getattr(space, "num_values", None)
+            if n is None:
+                raise
+            if hasattr(n, "item"):
+                n = n.item()
+            return gymnasium.spaces.Discrete(int(n))
+
+    patched._eawm_craftax_discrete_patch = True
+    gymnax_spaces.gymnax_space_to_gym_space = patched
+
+
 def set_seed(seed: int) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -440,6 +470,7 @@ def main() -> None:
     os.environ.setdefault("JAX_PLATFORMS", "cpu")
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     os.chdir(easimulus_dir)
+    patch_gymnax_discrete_space_conversion()
     set_seed(args.seed)
     cfg = build_cfg(easimulus_dir, args.seed)
 
