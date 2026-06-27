@@ -70,6 +70,13 @@ bash tools/decision_aware_precision_router/run_atari_dapr_full_4gpu.sh
 ```
 
 The full wrapper defaults to all 26 Atari tasks and `KEEP_RATIO=0.75`.
+The Atari launch script defaults to `DATALOADER_WORKERS=0` because several
+parallel Atari jobs can otherwise trigger PyTorch `DataLoader worker ... exited
+unexpectedly` / segmentation-fault failures on shared servers. It also uses a
+per-GPU `flock` lock by default, so accidentally launching keep50 and keep75
+sweeps at the same time will queue per GPU instead of running two heavy jobs on
+one card. Override with `DATALOADER_WORKERS=2` or `ENABLE_GPU_LOCK=0` only after
+the server has proven stable.
 
 3. Run Craftax sanity training:
 

@@ -13,6 +13,7 @@ GPU_IDS="${GPU_IDS:-0 1 2 3}"
 WANDB_MODE="${WANDB_MODE:-offline}"
 ENV_NAME="${ENV_NAME:-}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-10}"
+DATALOADER_WORKERS="${DATALOADER_WORKERS:-0}"
 KEEP_RATIO="${KEEP_RATIO:-0.5}"
 ROUTER="${ROUTER:-gumbel}"
 SUMMARY="${SUMMARY:-local_mean}"
@@ -21,6 +22,8 @@ BUDGET_LOSS_WEIGHT="${BUDGET_LOSS_WEIGHT:-0.01}"
 WARMUP_EPOCHS="${WARMUP_EPOCHS:-25}"
 FEATURE_DROPOUT_PROB="${FEATURE_DROPOUT_PROB:-0.5}"
 MEDIA_EPISODES_TO_SAVE="${MEDIA_EPISODES_TO_SAVE:-0}"
+ENABLE_GPU_LOCK="${ENABLE_GPU_LOCK:-1}"
+GPU_LOCK_DIR="${GPU_LOCK_DIR:-/tmp/eawm_dapr_gpu_locks}"
 
 LOG_ROOT="${PROJECT_ROOT}/logs/decision_aware_precision_router/atari/${EXP_NAME}_${TIMESTAMP}"
 OUTPUT_ROOT="${PROJECT_ROOT}/outputs/decision_aware_precision_router/atari/${EXP_NAME}"
@@ -104,6 +107,7 @@ run_one() {
     "wandb.name=dapr-${task}-seed${seed}"
     "wandb.group=${EXP_NAME}_${TIMESTAMP}"
     "common.checkpoint_every=${CHECKPOINT_EVERY}"
+    "common.num_dataloader_workers=${DATALOADER_WORKERS}"
     "collection.train.num_episodes_to_save=${MEDIA_EPISODES_TO_SAVE}"
     "collection.test.num_episodes_to_save=${MEDIA_EPISODES_TO_SAVE}"
     evaluation.tokenizer.save_reconstructions=False
@@ -125,7 +129,20 @@ run_one() {
     echo "[dapr-atari][start] date=$(date -Is) gpu=${gpu} task=${task} seed=${seed}"
     echo "[dapr-atari][cmd] CUDA_VISIBLE_DEVICES=${gpu} ${cmd[*]}"
     cd "${EASIMULUS_DIR}"
-    CUDA_VISIBLE_DEVICES="${gpu}" "${cmd[@]}"
+    if [[ "${ENABLE_GPU_LOCK}" == "1" ]] && command -v flock >/dev/null 2>&1; then
+      mkdir -p "${GPU_LOCK_DIR}"
+      local lock_file="${GPU_LOCK_DIR}/gpu${gpu}.lock"
+      (
+        flock -x 9
+        echo "[dapr-atari][lock] acquired ${lock_file}"
+        CUDA_VISIBLE_DEVICES="${gpu}" "${cmd[@]}"
+      ) 9>"${lock_file}"
+    else
+      if [[ "${ENABLE_GPU_LOCK}" == "1" ]]; then
+        echo "[dapr-atari][warn] flock not available; running without GPU lock."
+      fi
+      CUDA_VISIBLE_DEVICES="${gpu}" "${cmd[@]}"
+    fi
     echo "[dapr-atari][done] date=$(date -Is) task=${task} seed=${seed}"
   } 2>&1 | tee -a "${log_file}"
 }
@@ -153,6 +170,7 @@ main() {
   done
 
   echo "[dapr-atari] jobs=${#JOBS[@]} tasks=${TASKS} seeds=${SEEDS} gpus=${GPU_IDS}"
+  echo "[dapr-atari] dataloader_workers=${DATALOADER_WORKERS} gpu_lock=${ENABLE_GPU_LOCK} lock_dir=${GPU_LOCK_DIR}"
   echo "[dapr-atari] logs=${LOG_ROOT}"
   echo "[dapr-atari] outputs=${OUTPUT_ROOT}"
 
