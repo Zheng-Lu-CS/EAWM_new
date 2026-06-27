@@ -10,7 +10,8 @@ TIMESTAMP="${EXP_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
 SEEDS="${SEEDS:-0 1 2 3}"
 GPU_IDS="${GPU_IDS:-0 1 2 3}"
 WANDB_MODE="${WANDB_MODE:-offline}"
-ENV_NAME="${ENV_NAME:-}"
+ENV_NAME="${ENV_NAME:-zhenglu_eawm_craftax}"
+ENV_FILE="${ENV_FILE:-${PROJECT_ROOT}/logs/environment.yml}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-100}"
 
 LOG_ROOT="${PROJECT_ROOT}/logs/decision_aware_precision_router/craftax/${EXP_NAME}_${TIMESTAMP}"
@@ -35,6 +36,28 @@ activate_env() {
     # shellcheck source=/dev/null
     source "${conda_base}/etc/profile.d/conda.sh"
     conda activate "${ENV_NAME}"
+    echo "[dapr-craftax][env] activated ${ENV_NAME}"
+    echo "[dapr-craftax][env] CONDA_PREFIX=${CONDA_PREFIX:-unknown}"
+    if [[ -f "${ENV_FILE}" ]]; then
+      echo "[dapr-craftax][env] reference env file: ${ENV_FILE}"
+    fi
+    python - <<'PY'
+import sys
+
+import craftax
+import jax
+import torch
+
+craftax_version = getattr(craftax, "__version__", "unknown")
+print(
+    "[dapr-craftax][env] "
+    f"python={sys.version.split()[0]} "
+    f"craftax={craftax_version} "
+    f"jax={jax.__version__} "
+    f"torch={torch.__version__}",
+    flush=True,
+)
+PY
   fi
 }
 
@@ -108,8 +131,19 @@ run_one() {
 
 main() {
   activate_env
+  if [[ ! -d "${EASIMULUS_DIR}" ]]; then
+    echo "[dapr-craftax][error] EASimulus dir not found: ${EASIMULUS_DIR}"
+    exit 1
+  fi
   read -r -a SEED_ARRAY <<< "${SEEDS}"
   read -r -a GPU_ARRAY <<< "${GPU_IDS}"
+  if (( ${#GPU_ARRAY[@]} == 0 )); then
+    echo "[dapr-craftax][error] GPU_IDS is empty."
+    exit 1
+  fi
+  echo "[dapr-craftax] jobs=${#SEED_ARRAY[@]} seeds=${SEEDS} gpus=${GPU_IDS}"
+  echo "[dapr-craftax] logs=${LOG_ROOT}"
+  echo "[dapr-craftax] outputs=${OUTPUT_ROOT}"
   declare -a PIDS=()
   local idx gpu seed
   for idx in "${!SEED_ARRAY[@]}"; do
