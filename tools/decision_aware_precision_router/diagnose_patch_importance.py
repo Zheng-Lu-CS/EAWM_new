@@ -150,7 +150,6 @@ def _value_gradient_scores(agent, base_embeddings):
     from utils import ObsModality
 
     ac = agent.actor_critic
-    wm = agent.world_model
     b, t, k, e = base_embeddings.shape
     h = int(k ** 0.5)
     obs_codes = rearrange(
@@ -158,17 +157,24 @@ def _value_gradient_scores(agent, base_embeddings):
         "b t (h w) e -> b t e h w",
         h=h,
     )
-    ac.clear()
-    ac.reset(n=b)
-    values = []
-    for step in range(t):
-        _, critic_out = ac(inputs={ObsModality.image: obs_codes[:, step]})
-        values.append(critic_out.get_value_info().value_means)
-    value_objective = torch.stack(values, dim=1).abs().mean()
-    grad = torch.autograd.grad(
-        value_objective, obs_codes, retain_graph=False, create_graph=False
-    )[0]
-    ac.clear()
+    was_training = ac.training
+    # cuDNN RNN backward is only available in train mode. This mode switch is
+    # local to the diagnostic saliency computation and is restored immediately.
+    ac.train()
+    try:
+        ac.clear()
+        ac.reset(n=b)
+        values = []
+        for step in range(t):
+            _, critic_out = ac(inputs={ObsModality.image: obs_codes[:, step]})
+            values.append(critic_out.get_value_info().value_means)
+        value_objective = torch.stack(values, dim=1).abs().mean()
+        grad = torch.autograd.grad(
+            value_objective, obs_codes, retain_graph=False, create_graph=False
+        )[0]
+    finally:
+        ac.clear()
+        ac.train(was_training)
     return rearrange(grad.detach().norm(dim=2), "b t h w -> b t (h w)")
 
 
@@ -239,8 +245,14 @@ def run_diagnostic(args):
             uncertainty_scores = _expand_pred_scores(
                 uncertainty_pred, pred_mask, image_tokens.shape
             )
-            reward_grad_scores = _reward_gradient_scores(agent, batch, base_embeddings)
-            value_grad_scores = _value_gradient_scores(agent, base_embeddings)
+            if args.skip_reward_grad:
+                reward_grad_scores = torch.zeros_like(event_scores)
+            else:
+                reward_grad_scores = _reward_gradient_scores(agent, batch, base_embeddings)
+            if args.skip_value_grad:
+                value_grad_scores = torch.zeros_like(event_scores)
+            else:
+                value_grad_scores = _value_gradient_scores(agent, base_embeddings)
 
             strategies = {
                 "random": None,
@@ -324,6 +336,8 @@ def parse_args():
     parser.add_argument("--keep-ratios", type=float, nargs="+", default=[0.25, 0.5, 0.75])
     parser.add_argument("--summary-kernel", type=int, default=2)
     parser.add_argument("--output-dir", default="tools/decision_aware_precision_router/results")
+    parser.add_argument("--skip-reward-grad", action="store_true")
+    parser.add_argument("--skip-value-grad", action="store_true")
     return parser.parse_args()
 
 
