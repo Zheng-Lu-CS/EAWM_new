@@ -203,6 +203,9 @@ def build_agent(env, cfg, device):
             unknown_action=unknown_action,
         )
 
+    precision_router_cfg = OmegaConf.select(
+        cfg, "mechanism.decision_aware_precision_router"
+    )
     world_model = POPWorldModel(
         tokens_per_obs_dict=tokenizer.tokens_per_obs_dict,
         obs_vocab_size=tokenizer.vocab_size,
@@ -210,6 +213,7 @@ def build_agent(env, cfg, device):
         retnet_cfg=instantiate(cfg.world_model.retnet),
         device=device,
         eventshapes_per_obs_dict=eventshapes_per_obs_dict,
+        precision_router_cfg=precision_router_cfg,
         **cfg.world_model,
     )
     world_model.compile()
@@ -344,7 +348,16 @@ class Trainer:
                     ].vocab_size
                 )
         
-        self.worldmodel_info_handler = WorldmodelInfoHandler() if self.cfg.world_model.event_pred else None
+        dapr_enabled = bool(
+            OmegaConf.select(
+                self.cfg,
+                "mechanism.decision_aware_precision_router.enabled",
+                default=False,
+            )
+        )
+        self.worldmodel_info_handler = (
+            WorldmodelInfoHandler() if self.cfg.world_model.event_pred or dapr_enabled else None
+        )
 
         logger.info(
             f"{sum(p.numel() for p in self.agent.world_model.parameters())} parameters in agent.world_model"
@@ -389,6 +402,7 @@ class Trainer:
     def run(self) -> None:
         for epoch in range(self.start_epoch, 1 + self.cfg.common.epochs):
             self.run_metadata.epoch = epoch
+            self._set_mechanism_epoch(epoch)
             logger.info(f"\nEpoch {epoch} / {self.cfg.common.epochs}\n")
             start_time = time.time()
             to_log = []
@@ -461,6 +475,7 @@ class Trainer:
     def final_eval(self):
         collection_kwargs = {**self.cfg.collection.test.config}
         epoch = self.run_metadata.epoch + 1
+        self._set_mechanism_epoch(epoch)
 
         if "num_episodes" in collection_kwargs:
             collection_kwargs["num_episodes"] = collection_kwargs["num_episodes_end"]
@@ -479,6 +494,11 @@ class Trainer:
         logger.info(test_collect_log)
         for metrics in test_collect_log:
             wandb.log({"epoch": epoch, **metrics})
+
+    def _set_mechanism_epoch(self, epoch: int) -> None:
+        precision_router = getattr(self.agent.world_model, "precision_router", None)
+        if precision_router is not None:
+            precision_router.set_epoch(epoch)
 
     def train_agent(self, epoch: int) -> None:
         self.agent.train()

@@ -1,0 +1,26 @@
+# @package mechanism.decision_aware_precision_router
+
+enabled: False
+
+# Fixed-slot precision allocation. The token count remains unchanged; low-precision
+# slots receive local summary embeddings instead of their full token embeddings.
+target_keep_ratio: 0.5
+min_keep_ratio: 0.05
+temperature: 1.0
+hard: True
+router: gumbel  # gumbel | topk | soft
+summary: local_mean  # local_mean | global_mean | learned
+summary_kernel: 2
+
+# Regularization terms are only applied to world-model training.
+budget_loss_weight: 0.01
+entropy_loss_weight: 0.0
+
+# Scalar side-channel capacity per patch. The implementation currently feeds
+# token-change/event-style features by default and accepts uncertainty/error/
+# saliency maps from diagnostics or future rollout hooks.
+feature_dim: 4
+hidden_dim: 128
+use_positional_features: True
+detach_summary: True
+warmup_epochs: 25

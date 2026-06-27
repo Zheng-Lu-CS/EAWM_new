@@ -63,4 +63,4 @@ class Agent(nn.Module):
         if ObsModality.vector in encoded:
             encoded[ObsModality.vector] = self.tokenizer.tokenizers[ObsModality.vector.name].decode(encoded[ObsModality.vector])
 
-        return encoded
+        return self.world_model.apply_precision_router_to_codes(encoded)

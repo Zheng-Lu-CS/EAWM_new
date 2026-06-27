@@ -26,6 +26,7 @@ from utils import (
 from utils.types import MultiModalObs, ObsModality
 from utils.distributions import sample_categorical, MultiCategoricalSampler
 from models.embedding import make_embeddings, ActionEncoder
+from mechanisms.decision_aware_precision_router import DecisionAwarePrecisionRouter
 import math
 
 
@@ -533,6 +534,7 @@ class POPWorldModel(nn.Module):
         convmotdecoder=True,
         judge_tendency=False,
         reward_end_use_all_embedding=False,
+        precision_router_cfg=None,
         device=None,
         *args,
         **kwargs,
@@ -575,6 +577,9 @@ class POPWorldModel(nn.Module):
         self._ordered_modalities = [
             modality for modality in ObsModality if modality in self.tokens_per_obs_dict
         ]
+        self.precision_router = self._build_precision_router(
+            precision_router_cfg, retnet_cfg, device
+        )
 
         self.head_observations = nn.ModuleDict(
             {
@@ -709,6 +714,25 @@ class POPWorldModel(nn.Module):
             self._device = next(self.parameters()).device
         return self._device
 
+    def _build_precision_router(self, cfg, retnet_cfg: RetNetConfig, device):
+        if cfg is None:
+            return None
+        cfg_dict = {k: v for k, v in cfg.items()}
+        enabled = bool(cfg_dict.get("enabled", False))
+        if not enabled:
+            return None
+        if ObsModality.image not in self.tokens_per_obs_dict:
+            logger.warning(
+                "DecisionAwarePrecisionRouter is enabled but no image modality is "
+                "present. It will be a no-op for this benchmark."
+            )
+            return None
+        return DecisionAwarePrecisionRouter(
+            embed_dim=retnet_cfg.embed_dim,
+            tokens_per_obs=self.tokens_per_obs_dict[ObsModality.image],
+            **cfg_dict,
+        ).to(device)
+
     def get_empty_state(self) -> RecurrentState:
         return RecurrentState(None, 0)
 
@@ -729,7 +753,10 @@ class POPWorldModel(nn.Module):
         return obs_tokens
 
     def embed_obs_tokens(
-        self, obs_tokens: dict[ObsModality, Tensor], tokenizer: MultiModalTokenizer
+        self,
+        obs_tokens: dict[ObsModality, Tensor],
+        tokenizer: MultiModalTokenizer,
+        route_features: Optional[Tensor] = None,
     ) -> Tensor:
         embs = []
         for modality in self.ordered_modalities:
@@ -746,6 +773,11 @@ class POPWorldModel(nn.Module):
                 )
                 if self.obs_emb_map is not None:
                     img_tokens_emb = self.obs_emb_map(img_tokens_emb)
+                img_tokens_emb = self.route_image_embeddings(
+                    img_tokens_emb,
+                    image_tokens=image_tokens,
+                    route_features=route_features,
+                )
                 embs.append(img_tokens_emb)
             else:
                 tokens_emb = self.obs_embeddings[modality.name](obs_tokens[modality])
@@ -762,15 +794,79 @@ class POPWorldModel(nn.Module):
         return self.action_encoder.embed_actions(actions)
 
     def get_tokens_emb(
-        self, obs_tokens, actions, tokenizer: MultiModalTokenizer
+        self,
+        obs_tokens,
+        actions,
+        tokenizer: MultiModalTokenizer,
+        route_features: Optional[Tensor] = None,
     ) -> Tensor:
-        obs_tokens_emb = self.embed_obs_tokens(obs_tokens, tokenizer=tokenizer)
+        obs_tokens_emb = self.embed_obs_tokens(
+            obs_tokens, tokenizer=tokenizer, route_features=route_features
+        )
         assert (
             obs_tokens_emb.dim() == 4
         ), f"Got {obs_tokens_emb.dim()} ({obs_tokens_emb.shape})"
         actions_emb = self.embed_actions(actions)
         assert actions_emb.dim() == 4, f"Got {actions_emb.dim()} ({actions_emb.shape})"
         return torch.cat([obs_tokens_emb, actions_emb], dim=2)
+
+    def route_image_embeddings(
+        self,
+        image_embeddings: Tensor,
+        image_tokens: Optional[Tensor] = None,
+        route_features: Optional[Tensor] = None,
+        epoch: Optional[int] = None,
+    ) -> Tensor:
+        if self.precision_router is None:
+            return image_embeddings
+        if route_features is None and image_tokens is not None:
+            route_features = self._build_token_change_route_features(
+                image_tokens, image_embeddings
+            )
+        return self.precision_router(
+            image_embeddings, route_features=route_features, epoch=epoch
+        )
+
+    def apply_precision_router_to_codes(
+        self,
+        codes: dict[ObsModality, Tensor],
+        route_features: Optional[Tensor] = None,
+        update_router: bool = False,
+    ) -> dict[ObsModality, Tensor]:
+        if self.precision_router is None or ObsModality.image not in codes:
+            return codes
+        z = codes[ObsModality.image]
+        if z.shape[-3] != self.config.embed_dim:
+            return codes
+        h, w = z.shape[-2:]
+        if h * w != self.tokens_per_obs_dict[ObsModality.image]:
+            return codes
+        image_embeddings = rearrange(z, "... e h w -> ... (h w) e")
+        if update_router:
+            routed = self.route_image_embeddings(
+                image_embeddings, route_features=route_features
+            )
+        else:
+            with torch.no_grad():
+                routed = self.route_image_embeddings(
+                    image_embeddings, route_features=route_features
+                )
+        routed = rearrange(routed, "... (h w) e -> ... e h w", h=h, w=w)
+        routed_codes = dict(codes)
+        routed_codes[ObsModality.image] = routed
+        return routed_codes
+
+    def _build_token_change_route_features(
+        self, image_tokens: Tensor, image_embeddings: Tensor
+    ) -> Tensor:
+        feature_dim = getattr(self.precision_router, "feature_dim", 0)
+        if feature_dim <= 0:
+            return None
+        features = image_embeddings.new_zeros(*image_embeddings.shape[:-1], feature_dim)
+        if image_tokens.dim() >= 3 and image_tokens.shape[-2] > 1:
+            change = image_tokens[..., 1:, :] != image_tokens[..., :-1, :]
+            features[..., 1:, :, 0] = change.to(features.dtype)
+        return features
 
     def sample_rewards_ends(self, outputs) -> tuple[Tensor, Tensor]:
         k1 = self.tokens_per_block
@@ -962,6 +1058,8 @@ class POPWorldModel(nn.Module):
     def compute_loss(
         self, batch: Batch, tokenizer: MultiModalTokenizer, **kwargs: Any
     ) -> tuple[LossWithIntermediateLosses, dict]:
+        if self.precision_router is not None:
+            self.precision_router.set_epoch(kwargs.get("epoch"))
         obs_tokens = self.get_obs_tokens(batch["observations"], tokenizer)
         tokens_emb = self.get_tokens_emb(
             obs_tokens, batch["actions"], tokenizer=tokenizer
@@ -991,6 +1089,9 @@ class POPWorldModel(nn.Module):
             losses["loss_events"] = loss_events.mean()
         if curiosity_loss is not None:
             losses["curiosity_loss"] = curiosity_loss
+        if self.precision_router is not None:
+            losses.update(self.precision_router.regularization_losses())
+            info.update(self.precision_router.info())
 
         return LossWithIntermediateLosses(**losses), info
 

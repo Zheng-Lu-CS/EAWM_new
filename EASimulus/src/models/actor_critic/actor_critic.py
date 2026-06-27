@@ -510,6 +510,7 @@ class ActorCriticLS(nn.Module):
             codes[ObsModality.vector] = tokenizer.tokenizers[
                 ObsModality.vector.name
             ].decode(codes[ObsModality.vector])
+        codes = world_model.apply_precision_router_to_codes(codes)
         return codes
 
     def imagine(

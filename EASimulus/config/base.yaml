@@ -6,6 +6,7 @@ defaults:
   - env: ???
   - datasets: ???
   - benchmark: ???
+  - mechanism: decision_aware_precision_router
 
 outputs_dir_path: ./outputs
 

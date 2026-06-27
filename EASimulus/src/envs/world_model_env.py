@@ -135,10 +135,12 @@ class POPWorldModelEnv:
             tokens_emb = action_emb
         outputs_wm = self.query_world_model(tokens_emb)
 
-        self.last_obs_tokens, reward, done = self._compute_next_obs_tokens(outputs_wm)
+        self.last_obs_tokens, reward, done, route_features = self._compute_next_obs_tokens(outputs_wm)
         if self.world_model.uses_pop:
             obs_tokens = {k: v.unsqueeze(1) for k, v in self.last_obs_tokens.items()}
-            self.prior_context = self.world_model.embed_obs_tokens(obs_tokens, self.tokenizer).squeeze(1)
+            self.prior_context = self.world_model.embed_obs_tokens(
+                obs_tokens, self.tokenizer, route_features=route_features
+            ).squeeze(1)
         else:
             self.prior_context = None
 
@@ -153,16 +155,24 @@ class POPWorldModelEnv:
             preds = self.world_model.compute_next_obs_pred_latents(self.recurrent_state)[0]
         next_obs_tokens = self.world_model.sample_obs_tokens(preds)
         rewards, ends = self.world_model.sample_rewards_ends(preds)
+        route_features = None
         if self.world_model.enable_curiosity:
             d = self.world_model.tokens_per_obs_dict
             preds = torch.split(preds, [d[m] for m in self.world_model.ordered_modalities], dim=1)
+            uncertainties = [
+                self.world_model.curiosity_head[m.name].estimate_uncertainty(preds[i])[0]
+                for i, m in enumerate(self.world_model.ordered_modalities)
+            ]
             intrinsic_reward = torch.cat([
-                self.world_model.curiosity_head[m.name].estimate_uncertainty(preds[i])[0].mean(-1, keepdim=True)*self.modality_curiosity_balance[m]
+                uncertainties[i].mean(-1, keepdim=True) * self.modality_curiosity_balance[m]
                 for i, m in enumerate(self.world_model.ordered_modalities)
             ], dim=-1).sum(dim=-1, keepdim=True)
+            if ObsModality.image in self.world_model.ordered_modalities:
+                image_idx = self.world_model.ordered_modalities.index(ObsModality.image)
+                route_features = uncertainties[image_idx].unsqueeze(-1).unsqueeze(1)
             assert rewards.shape == intrinsic_reward.shape, f"{rewards.shape}; {intrinsic_reward.shape}"
             rewards = self.real_reward_weight * rewards + self.intrinsic_reward_weight * intrinsic_reward
-        return next_obs_tokens, rewards, ends
+        return next_obs_tokens, rewards, ends, route_features
     @torch.no_grad()
     def _compute_total_reward_with_real_env(self, action: Union[int, np.ndarray, torch.LongTensor],rewards:Tensor):
         action_emb = self._embed_action(action)
@@ -195,9 +205,10 @@ class POPWorldModelEnv:
 
     @torch.no_grad()
     def decode_obs_tokens(self) -> Tensor:
-        embedded_tokens = self.tokenizer[ObsModality.image].embedding(self.last_obs_tokens[ObsModality.image])  # (B, K, E)
+        image_tokenizer = self.tokenizer.tokenizers[ObsModality.image.name]
+        embedded_tokens = image_tokenizer.embedding(self.last_obs_tokens[ObsModality.image])  # (B, K, E)
         z = rearrange(embedded_tokens, 'b (h w) e -> b e h w', h=int(np.sqrt(embedded_tokens.shape[1])))
-        rec = self.tokenizer[ObsModality.image].decode(z, should_postprocess=True)  # (B, C, H, W)
+        rec = image_tokenizer.decode(z, should_postprocess=True)  # (B, C, H, W)
         return torch.clamp(rec, 0, 1)
 
     @torch.no_grad()

@@ -29,9 +29,13 @@ def configure_optimizer(model, learning_rate, weight_decay):
 
     for pn, p in model.named_parameters():
         param_names_lst = pn.split(sep='.')
-        layer_norm_pattern = '\.ln(\d+)|(_f)\.'
+        layer_norm_pattern = r'\.ln(\d+)|(_f)\.'
 
         if param_names_lst[-1] == 'bias':
+            no_decay.add(pn)
+        elif param_names_lst[-1] == 'summary_token':
+            no_decay.add(pn)
+        elif 'precision_router.score_net.0' in pn:
             no_decay.add(pn)
         elif 'norm' in pn:
             no_decay.add(pn)
@@ -280,12 +284,19 @@ class WorldmodelInfoHandler(TrainerInfoHandler):
             if k=="change_percents":
                 for modality,mc in v.items():
                     self.buffer.setdefault(modality.name+"_change_percents", []).append(mc.mean())
+            elif k.startswith("dapr_"):
+                if torch.is_tensor(v):
+                    self.buffer.setdefault(k, []).append(v.detach())
+                else:
+                    self.buffer.setdefault(k, []).append(torch.tensor(v))
 
     def get_epoch_info(self) -> dict:
         info = {}
         for k, v in self.buffer.items():
             if k.endswith('_change_percents'):
                 info[k] = torch.stack(v).mean().item()
+            elif k.startswith("dapr_"):
+                info[k] = torch.stack(v).float().mean().item()
 
         return info
 
