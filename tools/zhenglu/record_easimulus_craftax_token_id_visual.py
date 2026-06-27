@@ -17,9 +17,9 @@ from hydra.utils import instantiate
 from PIL import Image, ImageDraw, ImageFont
 
 from envs import SingleProcessEnv
-from game import CraftaxAgentEnv
 from main import build_agent
 from utils import ObsModality
+from utils.preprocessing import get_obs_processor
 
 
 MODALITY_ORDER = [ObsModality.vector, ObsModality.token, ObsModality.token_2d]
@@ -91,6 +91,129 @@ def patch_gymnax_discrete_space_conversion() -> None:
 
     patched._eawm_craftax_discrete_patch = True
     gymnax_spaces.gymnax_space_to_gym_space = patched
+
+
+def load_craftax_block_pixel_size() -> int:
+    for module_name in ("craftax.craftax.constants", "craftax.craftax.play_craftax"):
+        try:
+            module = __import__(module_name, fromlist=["BLOCK_PIXEL_SIZE_HUMAN"])
+            return int(getattr(module, "BLOCK_PIXEL_SIZE_HUMAN"))
+        except (ImportError, AttributeError):
+            continue
+    return 16
+
+
+def load_craftax_action_names(num_actions: int) -> list[str]:
+    for module_name in ("craftax.craftax.constants", "craftax.craftax.play_craftax"):
+        try:
+            module = __import__(module_name, fromlist=["Action"])
+            action_enum = getattr(module, "Action")
+            names = [action.name for action in action_enum]
+            if len(names) >= num_actions:
+                return names
+        except (ImportError, AttributeError, TypeError):
+            continue
+    return [f"action_{i}" for i in range(num_actions)]
+
+
+def make_craftax_pixel_renderer(block_pixel_size: int):
+    import jax
+    from craftax.craftax import renderer
+
+    if hasattr(renderer, "make_craftax_pixel_renderer"):
+        render_fn = renderer.make_craftax_pixel_renderer(block_pixel_size)
+        return jax.jit(render_fn)
+
+    if hasattr(renderer, "render_craftax_pixels"):
+        render_fn = renderer.render_craftax_pixels
+        return jax.jit(lambda state: render_fn(state, block_pixel_size=block_pixel_size))
+
+    return None
+
+
+def find_gymnax_wrapper(env: SingleProcessEnv):
+    current = env.env
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if hasattr(current, "env_state"):
+            return current
+        current = getattr(current, "env", None)
+    return None
+
+
+class CraftaxTokenDemoEnv:
+    def __init__(self, agent, env: SingleProcessEnv, pixel_render_size: int) -> None:
+        self.agent = agent
+        self.env = env
+        self.pixel_render_size = pixel_render_size
+        self.obs = None
+        self._t = 0
+        self._return = 0.0
+        self.obs_processors = {m: get_obs_processor(m) for m in env.modalities}
+        self.action_names = load_craftax_action_names(env.num_actions or 0)
+        block_pixel_size = load_craftax_block_pixel_size()
+        self._renderer = make_craftax_pixel_renderer(block_pixel_size)
+        self._gymnax_wrapper = find_gymnax_wrapper(env)
+        if self._renderer is None:
+            print("[craftax-token-vis][warn] Craftax pixel renderer not found; using token-map fallback renderer.")
+        elif self._gymnax_wrapper is None:
+            print("[craftax-token-vis][warn] Gymnax env_state not found; using token-map fallback renderer.")
+
+    @torch.no_grad()
+    def _to_tensor(self, obs: dict[str, np.ndarray]):
+        assert isinstance(obs, dict)
+        expected = {m.name for m in self.env.modalities}
+        assert set(obs.keys()) == expected, f"{set(obs.keys())} != {expected}"
+        torch_obs = {
+            m: self.obs_processors[m].to_torch(obs[m.name], device=self.agent.device)
+            for m in self.env.modalities
+        }
+        return {m: self.obs_processors[m](v) for m, v in torch_obs.items()}
+
+    def reset(self):
+        obs, _ = self.env.reset()
+        self.obs = self._to_tensor(obs)
+        self.agent.actor_critic.reset(1)
+        self._t = 0
+        self._return = 0.0
+        return obs
+
+    def step(self):
+        with torch.no_grad():
+            act = self.agent.act(self.obs, should_sample=True).cpu().numpy()
+        obs, reward, terminated, truncated, _ = self.env.step(act)
+        self.obs = self._to_tensor(obs)
+        self._t += 1
+        self._return += float(reward[0])
+        action_idx = int(act[0])
+        action_name = self.action_names[action_idx] if action_idx < len(self.action_names) else f"action_{action_idx}"
+        info = {
+            "Timestep": self._t,
+            "Action": action_name,
+            "Return": f"{self._return:.2f}",
+        }
+        return obs, reward, terminated, truncated, info
+
+    def render(self) -> Image.Image:
+        if self._renderer is not None and self._gymnax_wrapper is not None:
+            try:
+                pixels = self._renderer(self._gymnax_wrapper.env_state)
+                arr = np.asarray(pixels)
+                if arr.dtype != np.uint8:
+                    if arr.size and float(np.nanmax(arr)) <= 1.5:
+                        arr = arr * 255.0
+                    arr = np.clip(arr, 0, 255).astype(np.uint8)
+                arr = np.repeat(arr, repeats=self.pixel_render_size, axis=0)
+                arr = np.repeat(arr, repeats=self.pixel_render_size, axis=1)
+                return Image.fromarray(arr)
+            except Exception as exc:
+                print(f"[craftax-token-vis][warn] Craftax pixel render failed once; using token-map fallback. error={exc}")
+                self._renderer = None
+
+        tokens = self.obs[ObsModality.token_2d][0].detach().cpu().numpy().astype(np.int64)
+        image = render_token_grid(tokens, direction_token=None, cell_size=max(18, self.pixel_render_size * 8))
+        return image
 
 
 def set_seed(seed: int) -> None:
@@ -390,7 +513,7 @@ def write_report(
         f"| Video FPS | `{args.fps}` |",
         f"| Recorded frames | `{len(rows)}` |",
         f"| Adjacent frame pairs | `{max(len(rows) - 1, 0)}` |",
-        "| Agent interaction frame | One `CraftaxAgentEnv.step()` transition per recorded frame; this Craftax wrapper has no action-repeat wrapper. |",
+        "| Agent interaction frame | One policy-driven Craftax environment transition per recorded frame; this Craftax wrapper has no action-repeat wrapper. |",
         "| Token set used for rate | Flattened Simulus observation tokens: `vector`, `token` direction, and `token_2d` map. |",
         "| Right-side visualization | `token_2d` map as 9x11 Craftax cells; each cell shows block/item/mob/light token ids. |",
         "",
@@ -442,9 +565,7 @@ def write_report(
 
 
 def default_pixel_render_size() -> int:
-    from craftax.craftax.play_craftax import BLOCK_PIXEL_SIZE_HUMAN
-
-    return max(1, 64 // int(BLOCK_PIXEL_SIZE_HUMAN))
+    return max(1, 64 // load_craftax_block_pixel_size())
 
 
 def main() -> None:
@@ -491,7 +612,7 @@ def main() -> None:
     agent.eval()
 
     pixel_render_size = args.pixel_render_size if args.pixel_render_size > 0 else default_pixel_render_size()
-    visual_env = CraftaxAgentEnv(agent, test_env, pixel_render_size=pixel_render_size)
+    visual_env = CraftaxTokenDemoEnv(agent, test_env, pixel_render_size=pixel_render_size)
     visual_env.reset()
 
     output_dir.mkdir(parents=True, exist_ok=True)
