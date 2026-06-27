@@ -20,6 +20,10 @@ entropy_loss_weight: 0.0
 # token-change/event-style features by default and accepts uncertainty/error/
 # saliency maps from diagnostics or future rollout hooks.
 feature_dim: 4
+# Drop side-channel features during router training so deployment paths that
+# only have image embeddings, such as single-frame environment interaction, are
+# covered by the router's training distribution.
+feature_dropout_prob: 0.5
 hidden_dim: 128
 use_positional_features: True
 detach_summary: True

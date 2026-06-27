@@ -22,6 +22,7 @@ mechanism.decision_aware_precision_router.enabled=True
 mechanism.decision_aware_precision_router.target_keep_ratio=0.5
 mechanism.decision_aware_precision_router.router=gumbel
 mechanism.decision_aware_precision_router.summary=local_mean
+mechanism.decision_aware_precision_router.feature_dropout_prob=0.5
 ```
 
 Recommended order:
@@ -59,6 +60,16 @@ bash tools/decision_aware_precision_router/run_atari_dapr_validation_4gpu.sh
 Default tasks are `Breakout Seaquest Frostbite Kangaroo RoadRunner PrivateEye`
 with seeds `0 1 2`. Override `TASKS`, `SEEDS`, `GPU_IDS`, `KEEP_RATIO`, or
 `EXP_NAME` as needed.
+
+For full Atari experiments, use:
+
+```bash
+ENV_NAME=your_conda_env \
+PROJECT_ROOT=/path/to/EAWM \
+bash tools/decision_aware_precision_router/run_atari_dapr_full_4gpu.sh
+```
+
+The full wrapper defaults to all 26 Atari tasks and `KEEP_RATIO=0.75`.
 
 3. Run Craftax sanity training:
 

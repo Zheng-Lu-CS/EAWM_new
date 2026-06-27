@@ -33,6 +33,7 @@ class DecisionAwarePrecisionRouter(nn.Module):
         budget_loss_weight: float = 0.01,
         entropy_loss_weight: float = 0.0,
         feature_dim: int = 4,
+        feature_dropout_prob: float = 0.0,
         hidden_dim: int = 128,
         use_positional_features: bool = True,
         detach_summary: bool = True,
@@ -54,6 +55,7 @@ class DecisionAwarePrecisionRouter(nn.Module):
         self.budget_loss_weight = float(budget_loss_weight)
         self.entropy_loss_weight = float(entropy_loss_weight)
         self.feature_dim = int(feature_dim)
+        self.feature_dropout_prob = float(feature_dropout_prob)
         self.hidden_dim = int(hidden_dim)
         self.use_positional_features = bool(use_positional_features)
         self.detach_summary = bool(detach_summary)
@@ -124,6 +126,10 @@ class DecisionAwarePrecisionRouter(nn.Module):
         x_flat = x.reshape(-1, k, e)
         features = self._prepare_features(route_features, leading_shape, x.device, x.dtype)
         features = features.reshape(-1, k, self.feature_dim)
+        if self.training and self.feature_dropout_prob > 0.0:
+            keep = torch.rand(features.shape[0], 1, 1, device=features.device)
+            keep = (keep >= self.feature_dropout_prob).to(features.dtype)
+            features = features * keep
 
         if self.use_positional_features:
             pos = self._position_features(x.device, x.dtype)
