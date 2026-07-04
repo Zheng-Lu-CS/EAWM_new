@@ -21,6 +21,7 @@ wandb:
   group: null
   tags: null
   notes: null
+  id: null
   resume: False
 
 initialization:
@@ -119,7 +120,8 @@ training:
     treecf_cvar_fraction: 0.5
     treecf_trim_ratio: 0.25
     treecf_sample_temperature: 1.0
-    treecf_adv_baseline: policy
+    treecf_adv_baseline: median
+    treecf_adv_scale: std
     treecf_adv_eps: 1e-6
     treecf_adv_clip: 5.0
     treecf_uncertainty_beta: 1.0
@@ -127,6 +129,22 @@ training:
     treecf_depth_decay: 1.0
     treecf_depth_balance: True
     treecf_detach_node_states: True
+    dr_branching: 4
+    dr_rollout_horizon: 4
+    dr_candidate_mode: topk
+    dr_sample_temperature: 1.0
+    dr_center: median
+    dr_trim_ratio: 0.25
+    dr_adv_eps: 1e-6
+    dr_adv_clip: 5.0
+    dr_adv_scale: std
+    dr_uncertainty_beta: 1.0
+    dr_uncertainty_weight_min: 0.05
+    dr_q_head: False
+    dr_q_loss_weight: 0.5
+    dr_real_first_residual: False
+    dr_force_replay_action: False
+    dr_is_clip: 2.0
 
 evaluation:
   should: True
