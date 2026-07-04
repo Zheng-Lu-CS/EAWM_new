@@ -3,21 +3,27 @@ set -Eeuo pipefail
 
 PROJECT_ROOT="${PROJECT_ROOT:-/data/share/hxd/zhenglu/eawm}"
 ENV_NAME="${ENV_NAME:-zhenglu_easimulus}"
+LAUNCHER_VERSION="fixedwm_actor_20260704_wm_override_lock_v2"
 SEED="${SEED:-0}"
 SERVER_SET="${SERVER_SET:-A}"
 WANDB_MODE="${WANDB_MODE:-offline}"
-TASKS_PER_GPU="${TASKS_PER_GPU:-2}"
+TASKS_PER_GPU="${TASKS_PER_GPU:-1}"
 LAUNCH_STAGGER_SECONDS="${LAUNCH_STAGGER_SECONDS:-10}"
 AUTO_RESUME="${AUTO_RESUME:-1}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-10}"
 EVALUATION_EVERY="${EVALUATION_EVERY:-10}"
 MEDIA_EPISODES_TO_SAVE="${MEDIA_EPISODES_TO_SAVE:-0}"
-VARIANTS="${VARIANTS:-dreamer_fixedwm cf_median_k8_u1}"
+VARIANTS="${VARIANTS:-dreamer_fixedwm}"
 SOURCE_OUTPUT_PREFIX="${SOURCE_OUTPUT_PREFIX:-easimulus_atari_}"
 SOURCE_WORLD_MODEL_OVERRIDES="${SOURCE_WORLD_MODEL_OVERRIDES:-world_model.event_pred=True world_model.ges=True}"
+LOCK_HEARTBEAT_SECONDS="${LOCK_HEARTBEAT_SECONDS:-30}"
+LOCK_STALE_AFTER_SECONDS="${LOCK_STALE_AFTER_SECONDS:-300}"
+CLEAN_DISABLED_VARIANTS="${CLEAN_DISABLED_VARIANTS:-1}"
+DISABLED_VARIANTS="${DISABLED_VARIANTS:-cf_median_k8_u1}"
+ALLOW_NON_DREAMER_VARIANTS="${ALLOW_NON_DREAMER_VARIANTS:-0}"
 
-TASKS_A_DEFAULT="Alien Amidar Assault Asterix BankHeist BattleZone Breakout ChopperCommand CrazyClimber DemonAttack Freeway Frostbite"
-TASKS_B_DEFAULT="Gopher Jamesbond Kangaroo Krull KungFuMaster MsPacman Pong PrivateEye Qbert RoadRunner UpNDown"
+TASKS_A_DEFAULT="Alien Amidar Assault Asterix"
+TASKS_B_DEFAULT="Gopher Jamesbond Kangaroo Krull"
 
 if [[ -z "${TASKS:-}" ]]; then
   if [[ "${SERVER_SET}" == "A" ]]; then
@@ -89,6 +95,10 @@ check_inputs() {
     echo "[actor-launch][error] TASKS_PER_GPU must be a positive integer; got ${TASKS_PER_GPU}"
     exit 1
   fi
+  if [[ -z "${SOURCE_WORLD_MODEL_OVERRIDES//[[:space:]]/}" ]]; then
+    echo "[actor-launch][error] SOURCE_WORLD_MODEL_OVERRIDES is empty. Set it to match the source WM checkpoint, e.g. 'world_model.event_pred=True world_model.ges=True'."
+    exit 1
+  fi
   local gpu_count
   gpu_count="$(python - <<'PY'
 import torch
@@ -111,6 +121,10 @@ normalize_inputs() {
     TASK_ARRAY+=("${task}")
   done
   for variant in ${VARIANTS}; do
+    if [[ "${ALLOW_NON_DREAMER_VARIANTS}" != "1" && "${variant}" != "dreamer_fixedwm" ]]; then
+      echo "[actor-launch][skip] Non-dreamer variant '${variant}' is disabled for this continuation run."
+      continue
+    fi
     case "${variant}" in
       dreamer_fixedwm|cf_median_k8_u1|cf_trim_k8_u1)
         VARIANT_ARRAY+=("${variant}")
@@ -121,6 +135,10 @@ normalize_inputs() {
         ;;
     esac
   done
+  if (( ${#VARIANT_ARRAY[@]} == 0 )); then
+    echo "[actor-launch][error] No enabled variants remain after filtering; default continuation variant is dreamer_fixedwm."
+    exit 1
+  fi
   if (( ${#VARIANT_ARRAY[@]} > 3 )); then
     echo "[actor-launch][error] At most three variants per task are allowed."
     exit 1
@@ -129,6 +147,51 @@ normalize_inputs() {
     for variant in "${VARIANT_ARRAY[@]}"; do
       RUN_UNITS+=("${task}|${variant}")
     done
+  done
+}
+
+cleanup_disabled_variant_outputs() {
+  if [[ "${CLEAN_DISABLED_VARIANTS}" != "1" ]]; then
+    echo "[actor-launch] disabled variant cleanup is off."
+    return 0
+  fi
+
+  local variant path task_name log_lock output_base output_log_lock
+  for variant in ${DISABLED_VARIANTS}; do
+    echo "[actor-launch][cleanup] removing disabled variant '${variant}' logs and actor checkpoints"
+
+    if [[ -d "${LOG_ROOT}" ]]; then
+      while IFS= read -r path; do
+        task_name="$(basename "${path}")"
+        log_lock="${path}/run.lock"
+        if [[ -d "${log_lock}" ]] && lock_is_active "${log_lock}"; then
+          echo "[actor-launch][cleanup][skip] active lock for ${task_name}: ${log_lock}"
+          continue
+        fi
+        echo "[actor-launch][cleanup] rm -rf ${path}"
+        rm -rf -- "${path}"
+      done < <(find "${LOG_ROOT}" -mindepth 1 -maxdepth 1 -type d -name "*__${variant}" -print 2>/dev/null)
+    fi
+
+    if [[ -d "${PROJECT_ROOT}/outputs" ]]; then
+      while IFS= read -r path; do
+        output_base="$(basename "${path}")"
+        output_log_lock="${LOG_ROOT}/${output_base}/run.lock"
+        if [[ -d "${output_log_lock}" ]] && lock_is_active "${output_log_lock}"; then
+          echo "[actor-launch][cleanup][skip] active lock for ${output_base}: ${output_log_lock}"
+          continue
+        fi
+        echo "[actor-launch][cleanup] rm -rf ${path}"
+        rm -rf -- "${path}"
+      done < <(
+        find "${PROJECT_ROOT}/outputs" \
+          -mindepth 2 \
+          -maxdepth 2 \
+          -type d \
+          -path "*/fixedwm_actor_atari_*_seed${SEED}/*__${variant}" \
+          -print 2>/dev/null
+      )
+    fi
   done
 }
 
@@ -248,24 +311,140 @@ variant_args() {
   esac
 }
 
-acquire_lock() {
+proc_start_time() {
+  local pid="$1"
+  if [[ -r "/proc/${pid}/stat" ]]; then
+    awk '{print $22}' "/proc/${pid}/stat" 2>/dev/null || true
+  fi
+}
+
+lock_host() {
+  hostname -f 2>/dev/null || hostname
+}
+
+lock_heartbeat_is_fresh() {
   local lock_dir="$1"
-  if mkdir "${lock_dir}" 2>/dev/null; then
-    echo "${BASHPID}" > "${lock_dir}/pid"
+  local heartbeat="${lock_dir}/heartbeat"
+  [[ -f "${heartbeat}" ]] || return 1
+  local last now age
+  last="$(cat "${heartbeat}" 2>/dev/null || true)"
+  [[ "${last}" =~ ^[0-9]+$ ]] || return 1
+  now="$(date +%s)"
+  age=$((now - last))
+  (( age <= LOCK_STALE_AFTER_SECONDS ))
+}
+
+lock_mtime_is_fresh() {
+  local lock_dir="$1"
+  local mtime now age
+  mtime="$(stat -c %Y "${lock_dir}" 2>/dev/null || echo 0)"
+  [[ "${mtime}" =~ ^[0-9]+$ ]] || return 1
+  now="$(date +%s)"
+  age=$((now - mtime))
+  (( age <= LOCK_STALE_AFTER_SECONDS ))
+}
+
+write_lock_metadata() {
+  local lock_dir="$1"
+  local task_name="$2"
+  local host start
+  host="$(lock_host)"
+  start="$(proc_start_time "${BASHPID}")"
+  {
+    echo "pid: ${BASHPID}"
+    echo "host: ${host}"
+    echo "proc_start_time: ${start}"
+    echo "task_name: ${task_name}"
+    echo "launcher_version: ${LAUNCHER_VERSION}"
+    echo "created_at: $(date -Is)"
+  } > "${lock_dir}/owner.yaml"
+  echo "${BASHPID}" > "${lock_dir}/pid"
+  echo "${host}" > "${lock_dir}/host"
+  echo "${start}" > "${lock_dir}/proc_start_time"
+  date +%s > "${lock_dir}/heartbeat"
+}
+
+start_lock_heartbeat() {
+  local lock_dir="$1"
+  (
+    while true; do
+      date +%s > "${lock_dir}/heartbeat" 2>/dev/null || exit 0
+      sleep "${LOCK_HEARTBEAT_SECONDS}"
+    done
+  ) &
+  echo "$!" > "${lock_dir}/heartbeat_pid"
+}
+
+lock_owner_summary() {
+  local lock_dir="$1"
+  if [[ -f "${lock_dir}/owner.yaml" ]]; then
+    tr '\n' ' ' < "${lock_dir}/owner.yaml"
+  else
+    echo "pid=$(cat "${lock_dir}/pid" 2>/dev/null || true)"
+  fi
+}
+
+lock_is_active() {
+  local lock_dir="$1"
+  local pid host start current_start this_host
+  pid="$(cat "${lock_dir}/pid" 2>/dev/null || true)"
+  host="$(cat "${lock_dir}/host" 2>/dev/null || true)"
+  start="$(cat "${lock_dir}/proc_start_time" 2>/dev/null || true)"
+  this_host="$(lock_host)"
+
+  if [[ -n "${pid}" && "${host}" == "${this_host}" && -d "/proc/${pid}" ]]; then
+    current_start="$(proc_start_time "${pid}")"
+    if [[ -n "${start}" && "${current_start}" == "${start}" ]]; then
+      return 0
+    fi
+    if [[ -z "${start}" ]] && lock_mtime_is_fresh "${lock_dir}"; then
+      return 0
+    fi
+  fi
+
+  if [[ -n "${pid}" && -z "${host}" && -d "/proc/${pid}" ]] && lock_mtime_is_fresh "${lock_dir}"; then
     return 0
   fi
-  local pid=""
-  if [[ -f "${lock_dir}/pid" ]]; then
-    pid="$(cat "${lock_dir}/pid" 2>/dev/null || true)"
+
+  if lock_heartbeat_is_fresh "${lock_dir}"; then
+    return 0
   fi
-  if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
-    echo "[actor-launch][error] Active lock exists: ${lock_dir} pid=${pid}"
+
+  return 1
+}
+
+acquire_lock() {
+  local lock_dir="$1"
+  local task_name="${2:-unknown}"
+  if mkdir "${lock_dir}" 2>/dev/null; then
+    write_lock_metadata "${lock_dir}" "${task_name}"
+    start_lock_heartbeat "${lock_dir}"
+    return 0
+  fi
+  if lock_is_active "${lock_dir}"; then
+    echo "[actor-launch][error] Active lock exists: ${lock_dir} owner=[$(lock_owner_summary "${lock_dir}")]"
     return 1
   fi
-  echo "[actor-launch][resume] Removing stale lock: ${lock_dir}"
+  echo "[actor-launch][resume] Removing stale lock: ${lock_dir} owner=[$(lock_owner_summary "${lock_dir}")]"
   rm -rf "${lock_dir}"
-  mkdir "${lock_dir}"
-  echo "${BASHPID}" > "${lock_dir}/pid"
+  if ! mkdir "${lock_dir}" 2>/dev/null; then
+    echo "[actor-launch][error] Failed to reacquire lock after stale cleanup: ${lock_dir}"
+    return 1
+  fi
+  write_lock_metadata "${lock_dir}" "${task_name}"
+  start_lock_heartbeat "${lock_dir}"
+}
+
+release_lock() {
+  local lock_dir="$1"
+  local heartbeat_pid=""
+  if [[ -f "${lock_dir}/heartbeat_pid" ]]; then
+    heartbeat_pid="$(cat "${lock_dir}/heartbeat_pid" 2>/dev/null || true)"
+  fi
+  if [[ -n "${heartbeat_pid}" ]]; then
+    kill "${heartbeat_pid}" 2>/dev/null || true
+  fi
+  rm -rf "${lock_dir}"
 }
 
 write_manifest() {
@@ -285,11 +464,13 @@ variant: ${variant}
 seed: ${SEED}
 gpu: ${gpu}
 server_set: ${SERVER_SET}
+launcher_version: ${LAUNCHER_VERSION}
 resume: ${resume_flag}
 hydra_run_dir: ${run_dir}
 source_run_dir: ${source_run_dir}
 source_checkpoint: ${source_run_dir}/checkpoints/last.pt
 source_dataset: ${source_run_dir}/checkpoints/dataset
+source_world_model_overrides: ${SOURCE_WORLD_MODEL_OVERRIDES}
 log_file: ${LOG_ROOT}/${task_name}/train.log
 command: ${cmd_text}
 updated_at: $(date -Is)
@@ -311,13 +492,13 @@ run_one() {
   local resume_flag="false"
 
   mkdir -p "${log_dir}" "$(dirname "${run_dir}")"
-  if ! acquire_lock "${lock_dir}"; then
+  if ! acquire_lock "${lock_dir}" "${task_name}"; then
     return 1
   fi
 
   if ! source_run_dir="$(find_source_run_dir "${game_short}")"; then
     echo "[actor-launch][error] No source fixed-WM checkpoint found for ${game_short}" | python "${MONITOR_SCRIPT}" --task "${task_name}" >> "${log_file}"
-    rm -rf "${lock_dir}"
+    release_lock "${lock_dir}"
     return 1
   fi
 
@@ -396,7 +577,7 @@ run_one() {
   else
     echo "[actor-launch][ok] ${task_name}; log=${log_file}"
   fi
-  rm -rf "${lock_dir}"
+  release_lock "${lock_dir}"
   return "${rc}"
 }
 
@@ -435,8 +616,10 @@ activate_conda
 cd "${EASIMULUS_DIR}"
 check_inputs
 normalize_inputs
+cleanup_disabled_variant_outputs
 
 echo "[actor-launch] server_set=${SERVER_SET} seed=${SEED}"
+echo "[actor-launch] launcher_version=${LAUNCHER_VERSION}"
 echo "[actor-launch] tasks=${TASK_ARRAY[*]}"
 echo "[actor-launch] variants=${VARIANT_ARRAY[*]}"
 echo "[actor-launch] tasks_per_gpu=${TASKS_PER_GPU}"
