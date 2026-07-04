@@ -154,6 +154,10 @@ def build_agent(env, cfg, device):
     if set(tokenizers.keys()) != env.modalities:
         print(f"Modalities mismatch: env: {env.modalities}, tokenizers: {tokenizers.keys()}")
     tokenizer = MultiModalTokenizer(tokenizers=tokenizers)
+    actor_critic_kwargs = OmegaConf.to_container(cfg.actor_critic, resolve=True)
+    actor_critic_kwargs["dr_q_head"] = bool(
+        cfg.training.actor_critic.get("dr_q_head", False)
+    )
 
     # Init world model + controller:
     if is_continuous_env:
@@ -167,7 +171,7 @@ def build_agent(env, cfg, device):
             tokenize_actions=cfg.world_model.tokenize_actions,
         )
         actor_critic = DContinuousActorCriticLS(
-            **cfg.actor_critic,
+            **actor_critic_kwargs,
             action_dim=action_dim,
             obs_encoders=ac_encoders,
             context_len=cfg.world_model.context_length,
@@ -184,7 +188,7 @@ def build_agent(env, cfg, device):
             obs_encoders=ac_encoders,
             context_len=cfg.world_model.context_length,
             device=device,
-            **cfg.actor_critic,
+            **actor_critic_kwargs,
         )
     else:
         assert isinstance(env.action_space, gymnasium.spaces.Discrete)
@@ -195,7 +199,7 @@ def build_agent(env, cfg, device):
             unknown_action=unknown_action,
         )
         actor_critic = DiscreteActorCriticLS(
-            **cfg.actor_critic,
+            **actor_critic_kwargs,
             act_vocab_size=env.num_actions,
             obs_encoders=ac_encoders,
             context_len=cfg.world_model.context_length,
