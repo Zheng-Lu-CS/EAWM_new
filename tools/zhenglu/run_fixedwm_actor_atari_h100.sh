@@ -14,6 +14,7 @@ EVALUATION_EVERY="${EVALUATION_EVERY:-10}"
 MEDIA_EPISODES_TO_SAVE="${MEDIA_EPISODES_TO_SAVE:-0}"
 VARIANTS="${VARIANTS:-dreamer_fixedwm cf_median_k8_u1}"
 SOURCE_OUTPUT_PREFIX="${SOURCE_OUTPUT_PREFIX:-easimulus_atari_}"
+SOURCE_WORLD_MODEL_OVERRIDES="${SOURCE_WORLD_MODEL_OVERRIDES:-world_model.event_pred=True world_model.ges=True}"
 
 TASKS_A_DEFAULT="Alien Amidar Assault Asterix BankHeist BattleZone Breakout ChopperCommand CrazyClimber DemonAttack Freeway Frostbite"
 TASKS_B_DEFAULT="Gopher Jamesbond Kangaroo Krull KungFuMaster MsPacman Pong PrivateEye Qbert RoadRunner UpNDown"
@@ -336,6 +337,7 @@ run_one() {
   local extra_args_text
   extra_args_text="$(variant_args "${variant}")"
   read -r -a extra_args <<< "${extra_args_text}"
+  read -r -a source_wm_args <<< "${SOURCE_WORLD_MODEL_OVERRIDES}"
 
   local cmd=(
     python src/main.py
@@ -348,6 +350,7 @@ run_one() {
     "common.checkpoint_every=${CHECKPOINT_EVERY}"
     "evaluation.every=${EVALUATION_EVERY}"
     training.fixed_world_model=True
+    "${source_wm_args[@]}"
     "initialization.agent.path_to_checkpoint=${source_run_dir}/checkpoints/last.pt"
     initialization.agent.load_tokenizer=True
     initialization.agent.load_world_model=True
@@ -437,6 +440,7 @@ echo "[actor-launch] server_set=${SERVER_SET} seed=${SEED}"
 echo "[actor-launch] tasks=${TASK_ARRAY[*]}"
 echo "[actor-launch] variants=${VARIANT_ARRAY[*]}"
 echo "[actor-launch] tasks_per_gpu=${TASKS_PER_GPU}"
+echo "[actor-launch] source_world_model_overrides=${SOURCE_WORLD_MODEL_OVERRIDES}"
 echo "[actor-launch] output_root=${OUTPUT_ROOT}"
 echo "[actor-launch] log_root=${LOG_ROOT}"
 echo "[actor-launch] Hero is disabled."

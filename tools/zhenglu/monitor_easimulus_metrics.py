@@ -117,12 +117,20 @@ def main() -> None:
     task = args.task
     current_epoch: int | None = None
     in_traceback = False
+    in_state_dict_error = False
 
     for raw_line in sys.stdin:
         for line in raw_line.replace("\r", "\n").splitlines():
             line = line.rstrip("\n")
             if not line or is_tqdm_line(line):
                 continue
+
+            if in_state_dict_error:
+                if line.startswith("\t") or line.startswith(" ") or "key(s)" in line:
+                    print(f"[traceback][{task}] {line}", flush=True)
+                    continue
+                else:
+                    in_state_dict_error = False
 
             if "Traceback (most recent call last):" in line:
                 in_traceback = True
@@ -131,6 +139,10 @@ def main() -> None:
 
             if in_traceback:
                 print(f"[traceback][{task}] {line}", flush=True)
+                if "Error(s) in loading state_dict" in line:
+                    in_state_dict_error = True
+                    in_traceback = False
+                    continue
                 if TRACEBACK_END_RE.search(line):
                     in_traceback = False
                 continue
