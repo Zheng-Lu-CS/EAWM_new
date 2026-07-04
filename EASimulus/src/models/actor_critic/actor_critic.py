@@ -165,8 +165,10 @@ class ActorCriticLS(nn.Module):
     def clear(self) -> None:
         if self.rnn_type == "lstm":
             self.actor_state = (None, None)
+            self.critic_state = (None, None) if self.separate_networks else None
         elif self.rnn_type == "gru":
             self.actor_state = None
+            self.critic_state = None
 
     def get_zero_rnn_state(self, n, device, rnn_type: str = None):
         if rnn_type is None:

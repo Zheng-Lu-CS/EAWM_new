@@ -10,6 +10,7 @@ TASKS="${TASKS:-Alien Assault Asterix Breakout}"
 VARIANTS="${VARIANTS:-treecf_lcb_topk_d3b3 treecf_cvar_sample_d2b4}"
 SOURCE_WORLD_MODEL_OVERRIDES="${SOURCE_WORLD_MODEL_OVERRIDES:-world_model.event_pred=True world_model.ges=True}"
 FIXED_WM_SOURCE_ROOT="${FIXED_WM_SOURCE_ROOT:-${PROJECT_ROOT}/outputs}"
+ALLOW_SOURCE_ROOT_FALLBACK="${ALLOW_SOURCE_ROOT_FALLBACK:-1}"
 LAUNCH_STAGGER_SECONDS="${LAUNCH_STAGGER_SECONDS:-10}"
 AUTO_RESUME="${AUTO_RESUME:-1}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-10}"
@@ -158,7 +159,7 @@ source_override_var_name() {
 find_source_run_dir() {
   local game_short="$1"
   local game="${game_short}NoFrameskip-v4"
-  local line ckpt run_dir search_root override_var override_value
+  local line ckpt run_dir search_root override_var override_value source_pass
 
   override_var="$(source_override_var_name "${game_short}")"
   override_value="$(printenv "${override_var}" 2>/dev/null || true)"
@@ -171,31 +172,43 @@ find_source_run_dir() {
     return 1
   fi
 
-  while IFS= read -r line; do
-    ckpt="${line#* }"
-    run_dir="$(dirname "$(dirname "${ckpt}")")"
-    [[ "${run_dir}" == *"/treecf_actor_atari_"* ]] && continue
-    [[ "${run_dir}" == *"/fixedwm_actor_atari_"* ]] && continue
-    if [[ "${ckpt}" != *"/${game_short}_seed${SEED}/"* && "${ckpt}" != *"/${game}/"* ]]; then
-      continue
-    fi
-    if is_valid_source_run_dir "${run_dir}"; then
-      echo "${run_dir}"
-      return 0
-    fi
-  done < <(
-    while IFS= read -r search_root; do
-      find "${search_root}" \
-        -type f \
-        -path "*/checkpoints/last.pt" \
-        -printf '%T@ %p\n' 2>/dev/null
-    done < <(
-      if [[ -d "${FIXED_WM_SOURCE_ROOT}" ]]; then
-        find "${FIXED_WM_SOURCE_ROOT}" -maxdepth 1 -type d -name "${SOURCE_OUTPUT_PREFIX}*" 2>/dev/null
-        printf '%s\n' "${FIXED_WM_SOURCE_ROOT}"
+  for source_pass in prefixed fallback; do
+    if [[ "${source_pass}" == "fallback" ]]; then
+      if [[ "${ALLOW_SOURCE_ROOT_FALLBACK}" != "1" ]]; then
+        break
       fi
-    ) | sort -nr
-  )
+      echo "[treecf-launch][warn] No valid ${SOURCE_OUTPUT_PREFIX}* source found for ${game_short}; falling back to recursive search under ${FIXED_WM_SOURCE_ROOT}" >&2
+    fi
+
+    while IFS= read -r line; do
+      ckpt="${line#* }"
+      run_dir="$(dirname "$(dirname "${ckpt}")")"
+      [[ "${run_dir}" == *"/treecf_actor_atari_"* ]] && continue
+      [[ "${run_dir}" == *"/fixedwm_actor_atari_"* ]] && continue
+      if [[ "${ckpt}" != *"/${game_short}_seed${SEED}/"* && "${ckpt}" != *"/${game}/"* ]]; then
+        continue
+      fi
+      if is_valid_source_run_dir "${run_dir}"; then
+        echo "${run_dir}"
+        return 0
+      fi
+    done < <(
+      while IFS= read -r search_root; do
+        find "${search_root}" \
+          -type f \
+          -path "*/checkpoints/last.pt" \
+          -printf '%T@ %p\n' 2>/dev/null
+      done < <(
+        if [[ -d "${FIXED_WM_SOURCE_ROOT}" ]]; then
+          if [[ "${source_pass}" == "prefixed" ]]; then
+            find "${FIXED_WM_SOURCE_ROOT}" -maxdepth 1 -type d -name "${SOURCE_OUTPUT_PREFIX}*" 2>/dev/null
+          else
+            printf '%s\n' "${FIXED_WM_SOURCE_ROOT}"
+          fi
+        fi
+      ) | sort -nr
+    )
+  done
   return 1
 }
 
@@ -203,10 +216,10 @@ variant_args() {
   local variant="$1"
   case "${variant}" in
     treecf_lcb_topk_d3b3)
-      echo "training.actor_critic.actor_loss_mode=tree_counterfactual training.actor_critic.batch_num_samples=${TREECF_LCB_BATCH_NUM_SAMPLES:-8} training.actor_critic.treecf_depth=3 training.actor_critic.treecf_branching=3 training.actor_critic.treecf_candidate_mode=topk training.actor_critic.treecf_backup=lcb training.actor_critic.treecf_lcb_alpha=0.5 training.actor_critic.treecf_adv_baseline=policy training.actor_critic.treecf_uncertainty_beta=1.0 training.actor_critic.treecf_depth_decay=0.95 training.actor_critic.entropy_weight=0.001"
+      echo "training.actor_critic.actor_loss_mode=tree_counterfactual training.actor_critic.batch_num_samples=${TREECF_LCB_BATCH_NUM_SAMPLES:-8} training.actor_critic.treecf_depth=3 training.actor_critic.treecf_branching=3 training.actor_critic.treecf_candidate_mode=topk training.actor_critic.treecf_backup=lcb training.actor_critic.treecf_lcb_alpha=0.5 training.actor_critic.treecf_adv_baseline=median training.actor_critic.treecf_uncertainty_beta=1.0 training.actor_critic.treecf_depth_decay=0.95 training.actor_critic.entropy_weight=0.001"
       ;;
     treecf_cvar_sample_d2b4)
-      echo "training.actor_critic.actor_loss_mode=tree_counterfactual training.actor_critic.batch_num_samples=${TREECF_CVAR_BATCH_NUM_SAMPLES:-12} training.actor_critic.treecf_depth=2 training.actor_critic.treecf_branching=4 training.actor_critic.treecf_candidate_mode=sample training.actor_critic.treecf_backup=cvar training.actor_critic.treecf_cvar_fraction=0.5 training.actor_critic.treecf_sample_temperature=1.1 training.actor_critic.treecf_adv_baseline=policy training.actor_critic.treecf_uncertainty_beta=0.5 training.actor_critic.treecf_depth_decay=1.0 training.actor_critic.entropy_weight=0.002"
+      echo "training.actor_critic.actor_loss_mode=tree_counterfactual training.actor_critic.batch_num_samples=${TREECF_CVAR_BATCH_NUM_SAMPLES:-12} training.actor_critic.treecf_depth=2 training.actor_critic.treecf_branching=4 training.actor_critic.treecf_candidate_mode=sample training.actor_critic.treecf_backup=cvar training.actor_critic.treecf_cvar_fraction=0.5 training.actor_critic.treecf_sample_temperature=1.1 training.actor_critic.treecf_adv_baseline=trimmed_mean training.actor_critic.treecf_uncertainty_beta=0.5 training.actor_critic.treecf_depth_decay=1.0 training.actor_critic.entropy_weight=0.002"
       ;;
     *)
       echo "[treecf-launch][error] Unsupported variant '${variant}'." >&2
@@ -342,6 +355,11 @@ run_one() {
 
   if (( rc != 0 )); then
     echo "[treecf-launch][fail] ${task_name} rc=${rc}; log=${log_file}"
+    if [[ -f "${log_file}" ]]; then
+      echo "[treecf-launch][fail_tail_begin] ${task_name}"
+      tail -n "${FAIL_TAIL_LINES:-160}" "${log_file}" || true
+      echo "[treecf-launch][fail_tail_end] ${task_name}"
+    fi
   else
     echo "[treecf-launch][ok] ${task_name}; log=${log_file}"
   fi
@@ -376,6 +394,8 @@ echo "[treecf-launch] output_root=${OUTPUT_ROOT}"
 echo "[treecf-launch] log_root=${LOG_ROOT}"
 echo "[treecf-launch] source_root=${FIXED_WM_SOURCE_ROOT}"
 echo "[treecf-launch] source_output_prefix=${SOURCE_OUTPUT_PREFIX}"
+echo "[treecf-launch] source_world_model_overrides=${SOURCE_WORLD_MODEL_OVERRIDES}"
+echo "[treecf-launch] allow_source_root_fallback=${ALLOW_SOURCE_ROOT_FALLBACK}"
 echo "[treecf-launch] resume_output_prefix=${RESUME_OUTPUT_PREFIX}"
 echo "[treecf-launch] collect_real_prefix=${COLLECT_REAL_PREFIX}"
 echo "[treecf-launch] dry_run=${DRY_RUN}"

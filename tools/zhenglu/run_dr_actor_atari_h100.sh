@@ -233,6 +233,7 @@ run_one() {
   local task_name="${game_short}__${variant}"
   local log_dir="${LOG_ROOT}/${task_name}"
   local log_file="${log_dir}/train.log"
+  local raw_log_file="${log_dir}/train.raw.log"
   local task_output="${OUTPUT_ROOT}/${task_name}"
   local run_dir="${task_output}/hydra_run"
   local source_run_dir
@@ -334,14 +335,15 @@ run_one() {
     echo "[task] resume=${resume_flag}"
     echo "[task] command=CUDA_VISIBLE_DEVICES=${gpu} ${cmd[*]}"
     CUDA_VISIBLE_DEVICES="${gpu}" "${cmd[@]}"
-  } 2>&1 | monitor_cmd "${task_name}" >> "${log_file}"
-  local rc=${PIPESTATUS[0]}
+  } 2>&1 | tee -a "${raw_log_file}" | monitor_cmd "${task_name}" >> "${log_file}"
+  local pipe_status=("${PIPESTATUS[@]}")
+  local rc=${pipe_status[0]}
   set -e
 
   if (( rc != 0 )); then
-    echo "[dr-launch][fail] ${task_name} rc=${rc}; log=${log_file}"
+    echo "[dr-launch][fail] ${task_name} rc=${rc}; log=${log_file}; raw_log=${raw_log_file}"
   else
-    echo "[dr-launch][ok] ${task_name}; log=${log_file}"
+    echo "[dr-launch][ok] ${task_name}; log=${log_file}; raw_log=${raw_log_file}"
   fi
   return "${rc}"
 }

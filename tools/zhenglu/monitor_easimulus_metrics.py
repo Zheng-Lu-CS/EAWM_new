@@ -10,6 +10,15 @@ METRIC_RE = re.compile(
     r"'([^']+)': ([-+]?(?:\d+\.\d*|\d*\.\d+|\d+)(?:[eE][-+]?\d+)?)"
 )
 EPOCH_RE = re.compile(r"Epoch (\d+) / (\d+)")
+TRACEBACK_START_RE = re.compile(r"Traceback \(most recent call last\):")
+ERROR_LINE_RE = re.compile(
+    r"(RuntimeError|ValueError|KeyError|AssertionError|Exception|Error executing job|"
+    r"Missing key|Unexpected key|size mismatch|Error\(s\) in loading state_dict|"
+    r"ConfigCompositionException|ConfigAttributeError|InstantiationException|"
+    r"ModuleNotFoundError|ImportError|CUDA out of memory|OutOfMemoryError|"
+    r"\[state-dict\]|Failed to load)",
+    re.IGNORECASE,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -91,9 +100,28 @@ def main() -> None:
     args = parse_args()
     task = args.task
     current_epoch: int | None = None
+    in_traceback = False
 
     for raw_line in sys.stdin:
         line = raw_line.rstrip("\n")
+
+        if TRACEBACK_START_RE.search(line):
+            in_traceback = True
+            print(f"[traceback][{task}] {line}", flush=True)
+            continue
+
+        if in_traceback and METRIC_RE.findall(line):
+            in_traceback = False
+
+        if in_traceback:
+            print(f"[traceback][{task}] {line}", flush=True)
+            if not line:
+                in_traceback = False
+            continue
+
+        if ERROR_LINE_RE.search(line):
+            print(f"[traceback][{task}] {line}", flush=True)
+            continue
 
         epoch_match = EPOCH_RE.search(line)
         if epoch_match:
