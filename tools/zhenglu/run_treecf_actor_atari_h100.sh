@@ -11,6 +11,8 @@ VARIANTS="${VARIANTS:-treecf_lcb_topk_d3b3 treecf_cvar_sample_d2b4}"
 SOURCE_WORLD_MODEL_OVERRIDES="${SOURCE_WORLD_MODEL_OVERRIDES:-world_model.event_pred=True world_model.ges=True}"
 FIXED_WM_SOURCE_ROOT="${FIXED_WM_SOURCE_ROOT:-${PROJECT_ROOT}/outputs}"
 ALLOW_SOURCE_ROOT_FALLBACK="${ALLOW_SOURCE_ROOT_FALLBACK:-1}"
+SOURCE_EXCLUDE_REGEX="${SOURCE_EXCLUDE_REGEX:-dense|ablation|eadense|edense|decision_aware_precision_router|dapr}"
+GPU_LIST="${GPU_LIST:-0 1 2 3}"
 LAUNCH_STAGGER_SECONDS="${LAUNCH_STAGGER_SECONDS:-10}"
 AUTO_RESUME="${AUTO_RESUME:-1}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-10}"
@@ -53,6 +55,7 @@ export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-4}"
 
 declare -a TASK_ARRAY=()
 declare -a VARIANT_ARRAY=()
+declare -a GPU_ARRAY=()
 declare -a WORKER_PIDS=()
 
 activate_conda() {
@@ -73,12 +76,17 @@ activate_conda() {
 check_inputs() {
   read -r -a TASK_ARRAY <<< "${TASKS}"
   read -r -a VARIANT_ARRAY <<< "${VARIANTS}"
-  if (( ${#TASK_ARRAY[@]} != 4 )); then
-    echo "[treecf-launch][error] TASKS must contain exactly 4 Atari game names; got ${#TASK_ARRAY[@]}: ${TASKS}"
+  read -r -a GPU_ARRAY <<< "${GPU_LIST}"
+  if (( ${#TASK_ARRAY[@]} < 1 || ${#TASK_ARRAY[@]} > 4 )); then
+    echo "[treecf-launch][error] TASKS must contain 1 to 4 Atari game names; got ${#TASK_ARRAY[@]}: ${TASKS}"
     exit 1
   fi
   if (( ${#VARIANT_ARRAY[@]} != 2 )); then
     echo "[treecf-launch][error] VARIANTS must contain exactly 2 variants; got ${#VARIANT_ARRAY[@]}: ${VARIANTS}"
+    exit 1
+  fi
+  if (( ${#GPU_ARRAY[@]} < 1 )); then
+    echo "[treecf-launch][error] GPU_LIST must contain at least one CUDA device id."
     exit 1
   fi
   if [[ ! -d "${EASIMULUS_DIR}" ]]; then
@@ -89,14 +97,24 @@ check_inputs() {
     echo "[treecf-launch] DRY_RUN=1: skipping CUDA device-count check."
     return 0
   fi
+  local gpu_id max_gpu_id=-1
+  for gpu_id in "${GPU_ARRAY[@]}"; do
+    if [[ ! "${gpu_id}" =~ ^[0-9]+$ ]]; then
+      echo "[treecf-launch][error] GPU_LIST must contain non-negative integer ids; got '${gpu_id}'."
+      exit 1
+    fi
+    if (( gpu_id > max_gpu_id )); then
+      max_gpu_id="${gpu_id}"
+    fi
+  done
   local gpu_count
   gpu_count="$(python - <<'PY'
 import torch
 print(torch.cuda.device_count())
 PY
 )"
-  if (( gpu_count < 4 )); then
-    echo "[treecf-launch][error] Need at least 4 visible CUDA devices; found ${gpu_count}."
+  if (( gpu_count <= max_gpu_id )); then
+    echo "[treecf-launch][error] GPU_LIST=${GPU_LIST} requires CUDA device id ${max_gpu_id}, but only ${gpu_count} visible device(s) were found."
     exit 1
   fi
 }
@@ -105,6 +123,17 @@ is_valid_source_run_dir() {
   local run_dir="$1"
   [[ -f "${run_dir}/checkpoints/last.pt" ]] || return 1
   [[ -d "${run_dir}/checkpoints/dataset" ]] || return 1
+  return 0
+}
+
+is_allowed_source_run_dir() {
+  local run_dir="$1"
+  local run_dir_lower="${run_dir,,}"
+  local exclude_lower="${SOURCE_EXCLUDE_REGEX,,}"
+  if [[ -n "${exclude_lower}" && "${run_dir_lower}" =~ ${exclude_lower} ]]; then
+    echo "[treecf-launch][source_skip] excluded by SOURCE_EXCLUDE_REGEX='${SOURCE_EXCLUDE_REGEX}': ${run_dir}" >&2
+    return 1
+  fi
   return 0
 }
 
@@ -186,6 +215,9 @@ find_source_run_dir() {
       [[ "${run_dir}" == *"/treecf_actor_atari_"* ]] && continue
       [[ "${run_dir}" == *"/fixedwm_actor_atari_"* ]] && continue
       if [[ "${ckpt}" != *"/${game_short}_seed${SEED}/"* && "${ckpt}" != *"/${game}/"* ]]; then
+        continue
+      fi
+      if ! is_allowed_source_run_dir "${run_dir}"; then
         continue
       fi
       if is_valid_source_run_dir "${run_dir}"; then
@@ -389,6 +421,7 @@ check_inputs
 
 echo "[treecf-launch] timestamp=${TIMESTAMP}"
 echo "[treecf-launch] tasks=${TASK_ARRAY[*]}"
+echo "[treecf-launch] gpu_list=${GPU_ARRAY[*]}"
 echo "[treecf-launch] variants=${VARIANT_ARRAY[*]}"
 echo "[treecf-launch] output_root=${OUTPUT_ROOT}"
 echo "[treecf-launch] log_root=${LOG_ROOT}"
@@ -396,13 +429,15 @@ echo "[treecf-launch] source_root=${FIXED_WM_SOURCE_ROOT}"
 echo "[treecf-launch] source_output_prefix=${SOURCE_OUTPUT_PREFIX}"
 echo "[treecf-launch] source_world_model_overrides=${SOURCE_WORLD_MODEL_OVERRIDES}"
 echo "[treecf-launch] allow_source_root_fallback=${ALLOW_SOURCE_ROOT_FALLBACK}"
+echo "[treecf-launch] source_exclude_regex=${SOURCE_EXCLUDE_REGEX}"
 echo "[treecf-launch] resume_output_prefix=${RESUME_OUTPUT_PREFIX}"
 echo "[treecf-launch] collect_real_prefix=${COLLECT_REAL_PREFIX}"
 echo "[treecf-launch] dry_run=${DRY_RUN}"
 
 worker_id=0
-for gpu in 0 1 2 3; do
-  game_short="${TASK_ARRAY[$gpu]}"
+for task_index in "${!TASK_ARRAY[@]}"; do
+  gpu="${GPU_ARRAY[$((task_index % ${#GPU_ARRAY[@]}))]}"
+  game_short="${TASK_ARRAY[$task_index]}"
   for variant in "${VARIANT_ARRAY[@]}"; do
     (
       sleep "$((worker_id * LAUNCH_STAGGER_SECONDS))"
