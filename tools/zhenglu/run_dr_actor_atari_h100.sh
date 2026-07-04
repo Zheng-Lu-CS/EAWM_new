@@ -10,6 +10,7 @@ TASKS="${TASKS:-Alien Assault Asterix Breakout}"
 VARIANTS="${VARIANTS:-dr_q_topk_l4k4 dr_hybrid_sample_l3k6}"
 SOURCE_WORLD_MODEL_OVERRIDES="${SOURCE_WORLD_MODEL_OVERRIDES:-world_model.event_pred=True world_model.ges=True}"
 FIXED_WM_SOURCE_ROOT="${FIXED_WM_SOURCE_ROOT:-${PROJECT_ROOT}/outputs}"
+ALLOW_BROAD_SOURCE_SEARCH="${ALLOW_BROAD_SOURCE_SEARCH:-0}"
 LAUNCH_STAGGER_SECONDS="${LAUNCH_STAGGER_SECONDS:-10}"
 AUTO_RESUME="${AUTO_RESUME:-1}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-10}"
@@ -192,8 +193,12 @@ find_source_run_dir() {
         -printf '%T@ %p\n' 2>/dev/null
     done < <(
       if [[ -d "${FIXED_WM_SOURCE_ROOT}" ]]; then
-        find "${FIXED_WM_SOURCE_ROOT}" -maxdepth 1 -type d -name "${SOURCE_OUTPUT_PREFIX}*" 2>/dev/null
-        printf '%s\n' "${FIXED_WM_SOURCE_ROOT}"
+        if [[ -n "${SOURCE_OUTPUT_PREFIX}" ]]; then
+          find "${FIXED_WM_SOURCE_ROOT}" -maxdepth 1 -type d -name "${SOURCE_OUTPUT_PREFIX}*" 2>/dev/null
+        fi
+        if [[ "${ALLOW_BROAD_SOURCE_SEARCH}" == "1" || -z "${SOURCE_OUTPUT_PREFIX}" ]]; then
+          printf '%s\n' "${FIXED_WM_SOURCE_ROOT}"
+        fi
       fi
     ) | sort -nr
   )
@@ -376,6 +381,7 @@ echo "[dr-launch] output_root=${OUTPUT_ROOT}"
 echo "[dr-launch] log_root=${LOG_ROOT}"
 echo "[dr-launch] source_root=${FIXED_WM_SOURCE_ROOT}"
 echo "[dr-launch] source_output_prefix=${SOURCE_OUTPUT_PREFIX}"
+echo "[dr-launch] allow_broad_source_search=${ALLOW_BROAD_SOURCE_SEARCH}"
 echo "[dr-launch] resume_output_prefix=${RESUME_OUTPUT_PREFIX}"
 echo "[dr-launch] collect_real_prefix=${COLLECT_REAL_PREFIX}"
 echo "[dr-launch] dry_run=${DRY_RUN}"
