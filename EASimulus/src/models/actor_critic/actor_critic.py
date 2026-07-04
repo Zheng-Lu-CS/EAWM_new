@@ -16,6 +16,11 @@ from tqdm import tqdm
 
 from dataset import Batch
 from envs.world_model_env import POPWorldModelEnv
+from models.actor_critic.counterfactual import (
+    compute_uncertainty_weights,
+    normalize_tree_advantages,
+    robust_tree_backup,
+)
 from models.actor_critic.encoders import ObsEncoderBase
 from models.actor_critic.types import *
 from models.tokenizer import MultiModalTokenizer
@@ -28,6 +33,7 @@ from utils import (
     LSTMCellWrapper,
     ObsModality,
     HLGaussCategoricalRegressionHead,
+    RecurrentState,
 )
 from utils.types import MultiModalObs
 from utils.preprocessing import BufferScaler
@@ -364,6 +370,23 @@ class ActorCriticLS(nn.Module):
         imagine: bool,
         **kwargs: Any,
     ) -> tuple[LossWithIntermediateLosses, dict]:
+        actor_loss_mode = kwargs.get("actor_loss_mode", "dreamer")
+        if imagine and actor_loss_mode == "tree_counterfactual":
+            return self._compute_tree_counterfactual_loss(
+                batch=batch,
+                tokenizer=tokenizer,
+                world_model=world_model,
+                imagine_horizon=imagine_horizon,
+                gamma=gamma,
+                lambda_=lambda_,
+                entropy_weight=entropy_weight,
+                epoch=epoch,
+                actor_start_epoch=actor_start_epoch,
+                **kwargs,
+            )
+        if imagine and actor_loss_mode != "dreamer":
+            raise ValueError(f"Unknown actor_loss_mode: {actor_loss_mode}")
+
         if imagine:
             outputs = self.imagine(
                 batch, tokenizer, world_model, horizon=imagine_horizon
@@ -426,6 +449,72 @@ class ActorCriticLS(nn.Module):
                 real_loss_values=loss_values,
                 real_loss_entropy=loss_entropy,
             )
+        return intermediatelosses, info
+
+    def _compute_tree_counterfactual_loss(
+        self,
+        batch: Batch,
+        tokenizer: MultiModalTokenizer,
+        world_model: POPWorldModel,
+        imagine_horizon: int,
+        gamma: float,
+        lambda_: float,
+        entropy_weight: float,
+        epoch: int,
+        actor_start_epoch: int,
+        **kwargs: Any,
+    ) -> tuple[LossWithIntermediateLosses, dict]:
+        loss_actions, tree_entropy, tree_info = self._build_tree_counterfactual_actor_loss(
+            batch=batch,
+            tokenizer=tokenizer,
+            world_model=world_model,
+            horizon=imagine_horizon,
+            gamma=gamma,
+            entropy_weight=entropy_weight,
+            **kwargs,
+        )
+
+        if epoch < actor_start_epoch:
+            loss_actions = torch.zeros_like(loss_actions)
+            tree_entropy = torch.zeros_like(tree_entropy)
+
+        outputs = self.imagine(batch, tokenizer, world_model, horizon=imagine_horizon)
+        values_means = self._get_values_means(outputs.values_info)
+
+        with torch.no_grad():
+            lambda_returns = compute_lambda_returns(
+                rewards=outputs.rewards,
+                values=values_means,
+                ends=outputs.ends,
+                gamma=gamma,
+                lambda_=lambda_,
+            )[:, :-1]
+        self.return_scaler.update(lambda_returns)
+        returns_scale = torch.maximum(
+            torch.ones_like(self.return_scaler.scale), self.return_scaler.scale * 0.5
+        )
+
+        values = values_means[:, :-1]
+        loss_values = self._compute_critic_loss(outputs.values_info, lambda_returns)
+
+        info = {
+            "imagined_rewards": outputs.rewards.detach().clone(),
+            "imagined_returns": lambda_returns.detach().clone(),
+            "imagined_values": values.detach().clone(),
+            "imagined_normalized_advantage": (
+                (lambda_returns - values).detach() / returns_scale
+            ).detach().clone(),
+            "imagined_log_probs": outputs.actions_distributions.log_prob(
+                outputs.actions
+            )[:, :-1].detach().clone(),
+            "imagined_returns_scale": returns_scale.item(),
+            **tree_info,
+        }
+        intermediatelosses = LossWithIntermediateLosses(
+            imagined_loss_actor=loss_actions,
+            imagined_loss_values=loss_values,
+            imagined_loss_entropy=tree_entropy,
+        )
         return intermediatelosses, info
 
     def _compute_critic_loss(
@@ -511,6 +600,417 @@ class ActorCriticLS(nn.Module):
                 ObsModality.vector.name
             ].decode(codes[ObsModality.vector])
         return codes
+
+    @staticmethod
+    def _clone_tensor(x: Optional[Tensor], detach: bool = True) -> Optional[Tensor]:
+        if x is None:
+            return None
+        x = x.detach() if detach else x
+        return x.clone()
+
+    @staticmethod
+    def _repeat_first_dim(x: Optional[Tensor], repeats: int) -> Optional[Tensor]:
+        if x is None:
+            return None
+        return x.repeat_interleave(repeats, dim=0)
+
+    @staticmethod
+    def _clone_multimodal_batch(items: Optional[MultiModalObs], detach: bool = True):
+        if items is None:
+            return None
+        return {k: ActorCriticLS._clone_tensor(v, detach=detach) for k, v in items.items()}
+
+    @staticmethod
+    def _repeat_multimodal_batch(items: MultiModalObs, repeats: int) -> MultiModalObs:
+        return {k: v.repeat_interleave(repeats, dim=0) for k, v in items.items()}
+
+    @staticmethod
+    def _clone_rnn_state(state, detach: bool = True):
+        if state is None:
+            return None
+        if isinstance(state, tuple):
+            return tuple(ActorCriticLS._clone_rnn_state(s, detach=detach) for s in state)
+        return ActorCriticLS._clone_tensor(state, detach=detach)
+
+    @staticmethod
+    def _repeat_rnn_state(state, repeats: int):
+        if state is None:
+            return None
+        if isinstance(state, tuple):
+            return tuple(ActorCriticLS._repeat_rnn_state(s, repeats) for s in state)
+        return state.repeat_interleave(repeats, dim=0)
+
+    @staticmethod
+    def _clone_wm_state_tensor(state, detach: bool = True):
+        if state is None:
+            return None
+        if isinstance(state, tuple):
+            return tuple(
+                ActorCriticLS._clone_wm_state_tensor(s, detach=detach) for s in state
+            )
+        if isinstance(state, list):
+            return [
+                ActorCriticLS._clone_wm_state_tensor(s, detach=detach) for s in state
+            ]
+        return ActorCriticLS._clone_tensor(state, detach=detach)
+
+    @staticmethod
+    def _repeat_wm_state_tensor(state, repeats: int, batch_dim: Optional[int] = None):
+        if state is None:
+            return None
+        if isinstance(state, tuple):
+            return tuple(
+                ActorCriticLS._repeat_wm_state_tensor(s, repeats, batch_dim=0)
+                for s in state
+            )
+        if isinstance(state, list):
+            return [
+                ActorCriticLS._repeat_wm_state_tensor(s, repeats, batch_dim=0)
+                for s in state
+            ]
+        if batch_dim is None:
+            batch_dim = 1 if state.dim() >= 5 else 0
+        return state.repeat_interleave(repeats, dim=batch_dim)
+
+    @staticmethod
+    def _clone_wm_recurrent_state(
+        recurrent_state: Optional[RecurrentState], detach: bool = True
+    ) -> Optional[RecurrentState]:
+        if recurrent_state is None:
+            return None
+        n = recurrent_state.n
+        if isinstance(n, torch.Tensor):
+            n = ActorCriticLS._clone_tensor(n, detach=detach)
+        return RecurrentState(
+            ActorCriticLS._clone_wm_state_tensor(recurrent_state.state, detach=detach),
+            n,
+        )
+
+    @staticmethod
+    def _repeat_wm_recurrent_state(
+        recurrent_state: Optional[RecurrentState], repeats: int
+    ) -> Optional[RecurrentState]:
+        if recurrent_state is None:
+            return None
+        n = recurrent_state.n
+        if isinstance(n, torch.Tensor):
+            n = n.repeat_interleave(repeats, dim=0)
+        return RecurrentState(
+            ActorCriticLS._repeat_wm_state_tensor(recurrent_state.state, repeats),
+            n,
+        )
+
+    def _snapshot_wm_env(self, wm_env: POPWorldModelEnv, detach: bool = True) -> dict:
+        return {
+            "prior_context": self._clone_tensor(wm_env.prior_context, detach=detach),
+            "recurrent_state": self._clone_wm_recurrent_state(
+                wm_env.recurrent_state, detach=detach
+            ),
+            "last_obs_tokens": self._clone_multimodal_batch(
+                wm_env.last_obs_tokens, detach=detach
+            ),
+            "last_obs_tokens_emb": self._clone_tensor(
+                getattr(wm_env, "last_obs_tokens_emb", None), detach=detach
+            ),
+            "last_uncertainty": self._clone_tensor(
+                wm_env.last_uncertainty, detach=detach
+            ),
+        }
+
+    def _restore_wm_env(self, wm_env: POPWorldModelEnv, snapshot: dict) -> None:
+        wm_env.prior_context = snapshot["prior_context"]
+        wm_env.recurrent_state = snapshot["recurrent_state"]
+        wm_env.last_obs_tokens = snapshot["last_obs_tokens"]
+        wm_env.last_obs_tokens_emb = snapshot["last_obs_tokens_emb"]
+        wm_env.last_uncertainty = snapshot["last_uncertainty"]
+
+    def _repeat_wm_snapshot(self, snapshot: dict, repeats: int) -> dict:
+        return {
+            "prior_context": self._repeat_first_dim(snapshot["prior_context"], repeats),
+            "recurrent_state": self._repeat_wm_recurrent_state(
+                snapshot["recurrent_state"], repeats
+            ),
+            "last_obs_tokens": self._repeat_multimodal_batch(
+                snapshot["last_obs_tokens"], repeats
+            )
+            if snapshot["last_obs_tokens"] is not None
+            else None,
+            "last_obs_tokens_emb": self._repeat_first_dim(
+                snapshot["last_obs_tokens_emb"], repeats
+            ),
+            "last_uncertainty": self._repeat_first_dim(
+                snapshot["last_uncertainty"], repeats
+            ),
+        }
+
+    def _select_treecf_actions(
+        self,
+        logits: Tensor,
+        branching: int,
+        mode: str,
+        sample_temperature: float,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        assert logits.ndim == 2, f"Expected (nodes, actions), got {logits.shape}"
+        num_actions = logits.shape[-1]
+        branching = min(branching, num_actions)
+        policy_log_probs = torch.log_softmax(logits, dim=-1)
+        policy_probs = torch.softmax(logits, dim=-1)
+        proposal_probs = torch.softmax(logits / sample_temperature, dim=-1)
+        mode = mode.lower()
+
+        if mode == "topk":
+            actions = proposal_probs.topk(branching, dim=-1).indices
+        elif mode in {"sample", "sample_without_replacement"}:
+            actions = torch.multinomial(proposal_probs, branching, replacement=False)
+        elif mode == "sample_with_replacement":
+            actions = torch.multinomial(proposal_probs, branching, replacement=True)
+        elif mode == "mixed":
+            top1 = proposal_probs.argmax(dim=-1, keepdim=True)
+            if branching == 1:
+                actions = top1
+            else:
+                sample_probs = proposal_probs.scatter(1, top1, 0.0)
+                sample_probs = sample_probs / sample_probs.sum(dim=1, keepdim=True).clamp_min(1e-8)
+                sampled = torch.multinomial(sample_probs, branching - 1, replacement=False)
+                actions = torch.cat([top1, sampled], dim=1)
+        else:
+            raise ValueError(f"Unknown treecf_candidate_mode: {mode}")
+
+        return (
+            actions,
+            policy_log_probs.gather(1, actions),
+            policy_probs.gather(1, actions),
+        )
+
+    def _build_tree_counterfactual_actor_loss(
+        self,
+        batch: Batch,
+        tokenizer: MultiModalTokenizer,
+        world_model: POPWorldModel,
+        horizon: int,
+        gamma: float,
+        entropy_weight: float,
+        **kwargs: Any,
+    ) -> tuple[Tensor, Tensor, dict]:
+        if not hasattr(self, "num_actions"):
+            raise ValueError("tree_counterfactual currently supports discrete Atari actors only.")
+
+        effective_horizon = horizon - self.context_len + 1
+        depth = min(int(kwargs.get("treecf_depth", 3)), effective_horizon)
+        branching = min(int(kwargs.get("treecf_branching", 3)), int(self.num_actions))
+        if depth < 1:
+            raise ValueError("treecf_depth must be >= 1")
+        if branching < 2:
+            raise ValueError("treecf_branching must be >= 2")
+
+        candidate_mode = kwargs.get("treecf_candidate_mode", "topk")
+        backup_mode = kwargs.get("treecf_backup", "lcb")
+        sample_temperature = float(kwargs.get("treecf_sample_temperature", 1.0))
+        if sample_temperature <= 0:
+            raise ValueError("treecf_sample_temperature must be > 0")
+        detach_node_states = bool(kwargs.get("treecf_detach_node_states", True))
+        depth_balance = bool(kwargs.get("treecf_depth_balance", True))
+        adv_eps = float(kwargs.get("treecf_adv_eps", 1e-6))
+        adv_clip = float(kwargs.get("treecf_adv_clip", 5.0))
+        baseline_mode = kwargs.get("treecf_adv_baseline", "policy").lower()
+        uncertainty_beta = float(kwargs.get("treecf_uncertainty_beta", 1.0))
+        uncertainty_min_weight = float(kwargs.get("treecf_uncertainty_weight_min", 0.05))
+        depth_decay = float(kwargs.get("treecf_depth_decay", 1.0))
+
+        wm_env, obs_tokens = self._imagination_set_initial_state(
+            batch, tokenizer, world_model
+        )
+        current_actor_state = self._clone_rnn_state(
+            self.actor_state, detach=detach_node_states
+        )
+        current_critic_state = self._clone_rnn_state(
+            self.critic_state, detach=detach_node_states
+        )
+        current_wm_snapshot = self._snapshot_wm_env(wm_env, detach=True)
+        current_obs_tokens = self._clone_multimodal_batch(obs_tokens, detach=True)
+        current_alive = torch.ones(
+            batch["mask_padding"].shape[0], dtype=torch.bool, device=batch["mask_padding"].device
+        )
+
+        edges = []
+        entropies = []
+
+        for tree_depth in range(depth):
+            num_nodes = current_alive.numel()
+            self.actor_state = current_actor_state
+            self.critic_state = current_critic_state
+            self._restore_wm_env(wm_env, current_wm_snapshot)
+
+            obs_codes = self._to_codes(current_obs_tokens, world_model, tokenizer)
+            actor_outs, _ = self(inputs=obs_codes)
+            actions_dist = actor_outs.get_actions_distributions()
+            logits = actions_dist.logits[:, 0]
+            actions, log_probs, selected_policy_probs = self._select_treecf_actions(
+                logits=logits,
+                branching=branching,
+                mode=candidate_mode,
+                sample_temperature=sample_temperature,
+            )
+            node_entropy = actions_dist.entropy().reshape(num_nodes, -1)[:, 0]
+            entropies.append(node_entropy)
+
+            post_obs_actor_state = self._clone_rnn_state(
+                self.actor_state, detach=detach_node_states
+            )
+            post_obs_critic_state = self._clone_rnn_state(
+                self.critic_state, detach=detach_node_states
+            )
+
+            self.actor_state = self._repeat_rnn_state(post_obs_actor_state, branching)
+            self.critic_state = self._repeat_rnn_state(post_obs_critic_state, branching)
+            self._restore_wm_env(
+                wm_env, self._repeat_wm_snapshot(current_wm_snapshot, branching)
+            )
+
+            actions_flat = actions.reshape(-1, 1)
+            self.process_action(actions_flat.squeeze(1))
+            next_obs_tokens, reward, done, step_info = wm_env.step(
+                actions_flat,
+                should_predict_next_obs=True,
+                return_tokens=True,
+            )
+            uncertainty = None
+            if isinstance(step_info, dict):
+                uncertainty = step_info.get("uncertainty")
+            if uncertainty is None:
+                uncertainty = torch.zeros_like(reward.reshape(-1, 1))
+
+            rewards = reward.reshape(num_nodes, branching)
+            ends = done.reshape(num_nodes, branching).bool()
+            uncertainties = uncertainty.reshape(num_nodes, branching)
+            alive_edges = current_alive.reshape(num_nodes, 1).expand_as(ends)
+
+            edges.append(
+                {
+                    "log_probs": log_probs,
+                    "policy_probs": selected_policy_probs,
+                    "rewards": rewards.detach(),
+                    "ends": ends.detach(),
+                    "uncertainty": uncertainties.detach(),
+                    "alive": alive_edges.detach(),
+                    "depth": tree_depth,
+                }
+            )
+
+            current_actor_state = self._clone_rnn_state(
+                self.actor_state, detach=detach_node_states
+            )
+            current_critic_state = self._clone_rnn_state(
+                self.critic_state, detach=detach_node_states
+            )
+            current_wm_snapshot = self._snapshot_wm_env(wm_env, detach=True)
+            current_obs_tokens = self._clone_multimodal_batch(next_obs_tokens, detach=True)
+            current_alive = alive_edges.reshape(-1) & ends.reshape(-1).logical_not()
+
+        with torch.no_grad():
+            self.actor_state = current_actor_state
+            self.critic_state = current_critic_state
+            leaf_codes = self._to_codes(current_obs_tokens, world_model, tokenizer)
+            _, leaf_critic_outs = self(inputs=leaf_codes)
+            child_values = self._get_values_means(
+                leaf_critic_outs.get_value_info()
+            ).reshape(-1).detach()
+
+        actor_terms = []
+        all_edge_returns = []
+        all_advantages = []
+        all_weights = []
+        all_uncertainties = []
+        all_log_probs = []
+        all_policy_probs = []
+        all_depths = []
+        all_alive = []
+        depth_actor_losses = []
+
+        for edge in reversed(edges):
+            num_nodes, num_branches = edge["rewards"].shape
+            child_values = child_values.reshape(num_nodes, num_branches)
+            edge_returns = edge["rewards"] + gamma * edge["ends"].logical_not().float() * child_values
+            parent_values = robust_tree_backup(
+                edge_returns,
+                mode=backup_mode,
+                lcb_alpha=float(kwargs.get("treecf_lcb_alpha", 0.5)),
+                cvar_fraction=float(kwargs.get("treecf_cvar_fraction", 0.5)),
+                trim_ratio=float(kwargs.get("treecf_trim_ratio", 0.25)),
+            )
+
+            if baseline_mode == "policy":
+                policy_probs = edge["policy_probs"].detach()
+                policy_probs = policy_probs / policy_probs.sum(dim=1, keepdim=True).clamp_min(1e-8)
+                baseline = (policy_probs * edge_returns).sum(dim=1, keepdim=True)
+            elif baseline_mode == "mean":
+                baseline = edge_returns.mean(dim=1, keepdim=True)
+            elif baseline_mode == "backup":
+                baseline = parent_values.reshape(-1, 1)
+            else:
+                raise ValueError(f"Unknown treecf_adv_baseline: {baseline_mode}")
+
+            advantages = normalize_tree_advantages(
+                edge_returns - baseline,
+                edge_returns,
+                eps=adv_eps,
+                clip=adv_clip,
+            )
+            weights = compute_uncertainty_weights(
+                edge["uncertainty"],
+                beta=uncertainty_beta,
+                min_weight=uncertainty_min_weight,
+            )
+            if depth_decay != 1.0:
+                weights = weights * (depth_decay ** edge["depth"])
+            weights = weights * edge["alive"].float()
+
+            edge_actor_loss = -(weights.detach() * advantages.detach() * edge["log_probs"])
+            actor_terms.append(edge_actor_loss.reshape(-1))
+            depth_actor_losses.append(edge_actor_loss.mean())
+            all_edge_returns.append(edge_returns.detach().reshape(-1))
+            all_advantages.append(advantages.detach().reshape(-1))
+            all_weights.append(weights.detach().reshape(-1))
+            all_uncertainties.append(edge["uncertainty"].detach().reshape(-1))
+            all_log_probs.append(edge["log_probs"].detach().reshape(-1))
+            all_policy_probs.append(edge["policy_probs"].detach().reshape(-1))
+            all_depths.append(
+                torch.full(
+                    (num_nodes * num_branches,),
+                    edge["depth"],
+                    device=edge_returns.device,
+                    dtype=edge_returns.dtype,
+                )
+            )
+            all_alive.append(edge["alive"].float().reshape(-1))
+            child_values = parent_values.detach()
+
+        loss_actions = (
+            torch.stack(depth_actor_losses).mean()
+            if depth_balance
+            else torch.cat(actor_terms).mean()
+        )
+        entropy_values = torch.cat([e.reshape(-1) for e in entropies])
+        loss_entropy = -entropy_weight * (
+            torch.stack([e.mean() for e in entropies]).mean()
+            if depth_balance
+            else entropy_values.mean()
+        )
+        self.clear()
+
+        tree_info = {
+            "imagined_treecf_edge_returns": torch.cat(all_edge_returns),
+            "imagined_treecf_advantages": torch.cat(all_advantages),
+            "imagined_treecf_weights": torch.cat(all_weights),
+            "imagined_treecf_uncertainty": torch.cat(all_uncertainties),
+            "imagined_treecf_log_probs": torch.cat(all_log_probs),
+            "imagined_treecf_policy_probs": torch.cat(all_policy_probs),
+            "imagined_treecf_depths": torch.cat(all_depths),
+            "imagined_treecf_alive": torch.cat(all_alive),
+            "imagined_treecf_entropy": entropy_values.detach(),
+            "imagined_treecf_root_values": child_values.detach().reshape(-1),
+        }
+        return loss_actions, loss_entropy, tree_info
 
     def imagine(
         self,

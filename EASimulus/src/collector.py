@@ -60,7 +60,19 @@ class Collector:
         return processed_obs
 
     @torch.no_grad()
-    def collect(self, agent: Agent, epoch: int, epsilon: float, should_sample: bool, temperature: float, burn_in: int, *, num_steps: Optional[int] = None, num_episodes: Optional[int] = None):
+    def collect(
+        self,
+        agent: Agent,
+        epoch: int,
+        epsilon: float,
+        should_sample: bool,
+        temperature: float,
+        burn_in: int,
+        *,
+        num_steps: Optional[int] = None,
+        num_episodes: Optional[int] = None,
+        disable_tqdm: bool = False,
+    ):
         # assert self.env.num_actions == agent.world_model.act_vocab_size
         assert 0 <= epsilon <= 1
 
@@ -103,7 +115,12 @@ class Collector:
             mask_padding=mask_padding,
             actions=burning_actions
         )
-        pbar = tqdm(total=num_steps if num_steps is not None else num_episodes, desc=f'Experience collection ({self.dataset.name})', file=sys.stdout)
+        pbar = tqdm(
+            total=num_steps if num_steps is not None else num_episodes,
+            desc=f'Experience collection ({self.dataset.name})',
+            file=sys.stdout,
+            disable=disable_tqdm,
+        )
 
         while not should_stop(steps, episodes):
             if self.event_pred:

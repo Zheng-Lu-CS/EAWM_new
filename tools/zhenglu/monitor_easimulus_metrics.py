@@ -72,7 +72,11 @@ def print_metric(task: str, epoch: int | None, name: str, pairs: dict[str, float
             f"{prefix} ac_loss={fmt(pairs.get('actor_critic/train/total_loss'))} "
             f"imagined_return={fmt(pairs.get('actor_critic/train/imagined_returns_mean'))} "
             f"imagined_reward={fmt(pairs.get('actor_critic/train/imagined_rewards_mean'))} "
-            f"logp={fmt(pairs.get('actor_critic/train/imagined_log_probs_mean'))}",
+            f"logp={fmt(pairs.get('actor_critic/train/imagined_log_probs_mean'))} "
+            f"tree_adv={fmt(pairs.get('actor_critic/train/imagined_treecf_advantages_mean'))} "
+            f"tree_w={fmt(pairs.get('actor_critic/train/imagined_treecf_weights_mean'))} "
+            f"tree_u={fmt(pairs.get('actor_critic/train/imagined_treecf_uncertainty_mean'))} "
+            f"tree_root={fmt(pairs.get('actor_critic/train/imagined_treecf_root_values_mean'))}",
             flush=True,
         )
 

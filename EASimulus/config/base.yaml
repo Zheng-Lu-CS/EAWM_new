@@ -21,6 +21,7 @@ wandb:
   group: null
   tags: null
   notes: null
+  resume: False
 
 initialization:
   agent:
@@ -44,6 +45,7 @@ common:
   resume: False # set by resume.sh script only.
   # Engineering-only recovery knob. Defaults to the official evaluation interval.
   checkpoint_every: ${evaluation.every}
+  disable_tqdm: False
   float32_matmul_precision: 'highest'
   num_dataloader_workers: 2
 
@@ -75,6 +77,7 @@ collection:
 
 training:
   should: True
+  fixed_world_model: False
   learning_rate: 1e-4
   tokenizer:
     learning_rate: 1e-4
@@ -107,6 +110,23 @@ training:
     gamma: 0.99
     lambda_: 0.95
     entropy_weight: 0.001
+    actor_loss_mode: dreamer
+    treecf_depth: 3
+    treecf_branching: 3
+    treecf_candidate_mode: topk
+    treecf_backup: lcb
+    treecf_lcb_alpha: 0.5
+    treecf_cvar_fraction: 0.5
+    treecf_trim_ratio: 0.25
+    treecf_sample_temperature: 1.0
+    treecf_adv_baseline: policy
+    treecf_adv_eps: 1e-6
+    treecf_adv_clip: 5.0
+    treecf_uncertainty_beta: 1.0
+    treecf_uncertainty_weight_min: 0.05
+    treecf_depth_decay: 1.0
+    treecf_depth_balance: True
+    treecf_detach_node_states: True
 
 evaluation:
   should: True
