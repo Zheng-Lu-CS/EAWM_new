@@ -261,7 +261,11 @@ class EpisodesDataset:
         assert (
             directory.is_dir() and len(self.episodes) == 0
         ), f"Expected '{directory}' to be a directory; Expected 0 episodes, got {len(self.episodes)}"
-        episode_ids = sorted([int(p.stem) for p in directory.iterdir()])
+        episode_ids = sorted([int(p.stem) for p in directory.glob("*.pt")])
+        if not episode_ids:
+            self.num_seen_episodes = 0
+            logger.warning(f"No episode files found in dataset checkpoint '{directory}'.")
+            return
         self.num_seen_episodes = episode_ids[-1] + 1
         used_legacy_load = False
         for episode_id in episode_ids:

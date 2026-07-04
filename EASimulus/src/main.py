@@ -971,7 +971,21 @@ class Trainer:
             self.optimizer_tokenizer.load_state_dict(ckpt_opt["optimizer_tokenizer"])
         self.optimizer_world_model.load_state_dict(ckpt_opt["optimizer_world_model"])
         self.optimizer_actor_critic.load_state_dict(ckpt_opt["optimizer_actor_critic"])
-        self.train_dataset.load_disk_checkpoint(self.ckpt_dir / "dataset")
+        ckpt_dataset_dir = self.ckpt_dir / "dataset"
+        if ckpt_dataset_dir.is_dir() and any(ckpt_dataset_dir.glob("*.pt")):
+            self.train_dataset.load_disk_checkpoint(ckpt_dataset_dir)
+        elif self.cfg.initialization.dataset.path is not None:
+            dataset_path = project_root / Path(self.cfg.initialization.dataset.path)
+            logger.warning(
+                f"Resume checkpoint dataset is empty or missing at '{ckpt_dataset_dir}'. "
+                f"Loading initialization dataset instead: '{dataset_path.absolute()}'."
+            )
+            self.train_dataset.load_disk_checkpoint(dataset_path)
+        else:
+            logger.warning(
+                f"Resume checkpoint dataset is empty or missing at '{ckpt_dataset_dir}', "
+                "and no initialization.dataset.path was provided."
+            )
         if self.cfg.evaluation.should:
             self.test_dataset.num_seen_episodes = torch.load(
                 self.ckpt_dir / "num_seen_episodes_test_dataset.pt"
