@@ -19,6 +19,8 @@ wandb:
   entity: null
   name: null
   group: null
+  id: null
+  resume: null
   tags: null
   notes: null
 
@@ -44,6 +46,7 @@ common:
   resume: False # set by resume.sh script only.
   # Engineering-only recovery knob. Defaults to the official evaluation interval.
   checkpoint_every: ${evaluation.every}
+  disable_tqdm: False
   float32_matmul_precision: 'highest'
   num_dataloader_workers: 2
 
@@ -75,6 +78,7 @@ collection:
 
 training:
   should: True
+  fixed_world_model: False
   learning_rate: 1e-4
   tokenizer:
     learning_rate: 1e-4
@@ -107,6 +111,13 @@ training:
     gamma: 0.99
     lambda_: 0.95
     entropy_weight: 0.001
+    actor_loss_mode: dreamer
+    counterfactual_branches: 8
+    counterfactual_baseline: median
+    counterfactual_trim_ratio: 0.25
+    counterfactual_adv_eps: 1e-6
+    counterfactual_uncertainty_beta: 1.0
+    counterfactual_uncertainty_weight_min: 0.05
 
 evaluation:
   should: True

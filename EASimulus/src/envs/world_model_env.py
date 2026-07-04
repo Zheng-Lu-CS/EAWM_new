@@ -47,6 +47,7 @@ class POPWorldModelEnv:
         self.recurrent_state = None
         self._tokens_per_obs = world_model.tokens_per_obs
         self.last_obs_tokens = None
+        self.last_uncertainty = None
         self.keys_values_wm = None
         self.env = env
 
@@ -143,7 +144,27 @@ class POPWorldModelEnv:
             self.prior_context = None
 
         obs = self.decode_obs_tokens() if not return_tokens else self.last_obs_tokens
-        return obs, reward, done, None
+        return obs, reward, done, {"uncertainty": self.last_uncertainty}
+
+    def estimate_uncertainty_from_pred_latents(self, preds: torch.Tensor) -> torch.Tensor:
+        if not self.world_model.enable_curiosity or self.world_model.curiosity_head is None:
+            return torch.zeros(preds.shape[0], 1, device=preds.device, dtype=preds.dtype)
+
+        d = self.world_model.tokens_per_obs_dict
+        preds_by_modality = torch.split(
+            preds, [d[m] for m in self.world_model.ordered_modalities], dim=1
+        )
+        uncertainty = torch.cat(
+            [
+                self.world_model.curiosity_head[m.name]
+                .estimate_uncertainty(preds_by_modality[i])[0]
+                .mean(-1, keepdim=True)
+                * self.modality_curiosity_balance[m]
+                for i, m in enumerate(self.world_model.ordered_modalities)
+            ],
+            dim=-1,
+        ).sum(dim=-1, keepdim=True)
+        return uncertainty
 
     def _compute_next_obs_tokens(self, last_wm_output: torch.Tensor):
         if self.world_model.compute_states_parallel_inference:
@@ -153,13 +174,9 @@ class POPWorldModelEnv:
             preds = self.world_model.compute_next_obs_pred_latents(self.recurrent_state)[0]
         next_obs_tokens = self.world_model.sample_obs_tokens(preds)
         rewards, ends = self.world_model.sample_rewards_ends(preds)
+        self.last_uncertainty = self.estimate_uncertainty_from_pred_latents(preds)
         if self.world_model.enable_curiosity:
-            d = self.world_model.tokens_per_obs_dict
-            preds = torch.split(preds, [d[m] for m in self.world_model.ordered_modalities], dim=1)
-            intrinsic_reward = torch.cat([
-                self.world_model.curiosity_head[m.name].estimate_uncertainty(preds[i])[0].mean(-1, keepdim=True)*self.modality_curiosity_balance[m]
-                for i, m in enumerate(self.world_model.ordered_modalities)
-            ], dim=-1).sum(dim=-1, keepdim=True)
+            intrinsic_reward = self.last_uncertainty
             assert rewards.shape == intrinsic_reward.shape, f"{rewards.shape}; {intrinsic_reward.shape}"
             rewards = self.real_reward_weight * rewards + self.intrinsic_reward_weight * intrinsic_reward
         return next_obs_tokens, rewards, ends
@@ -178,12 +195,7 @@ class POPWorldModelEnv:
         else:
             preds = self.world_model.compute_next_obs_pred_latents(self.recurrent_state)[0]
         if self.world_model.enable_curiosity:
-            d = self.world_model.tokens_per_obs_dict
-            preds = torch.split(preds, [d[m] for m in self.world_model.ordered_modalities], dim=1)
-            intrinsic_reward = torch.cat([
-                self.world_model.curiosity_head[m.name].estimate_uncertainty(preds[i])[0].mean(-1, keepdim=True)
-                for i, m in enumerate(self.world_model.ordered_modalities)
-            ], dim=-1).sum(dim=-1, keepdim=True)
+            intrinsic_reward = self.estimate_uncertainty_from_pred_latents(preds)
             assert rewards.shape == intrinsic_reward.shape, f"{rewards.shape}; {intrinsic_reward.shape}"
             rewards = self.real_reward_weight * rewards + self.intrinsic_reward_weight * intrinsic_reward
         return rewards

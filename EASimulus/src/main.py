@@ -220,11 +220,12 @@ def build_agent(env, cfg, device):
 
 class Trainer:
     def __init__(self, cfg: DictConfig) -> None:
+        wandb_kwargs = OmegaConf.to_container(cfg.wandb, resolve=True)
+        wandb_kwargs.setdefault("resume", False)
         wandb.init(
             config=OmegaConf.to_container(cfg, resolve=True),
             reinit=True,
-            resume=False,
-            **cfg.wandb,
+            **wandb_kwargs,
         )
         self._finished = False
 
@@ -386,6 +387,19 @@ class Trainer:
         if cfg.common.resume:
             self.load_checkpoint()
 
+        if self.cfg.training.fixed_world_model:
+            self.freeze_world_model_components()
+
+    def freeze_world_model_components(self) -> None:
+        if self.agent.tokenizer is not None:
+            self.agent.tokenizer.requires_grad_(False)
+            self.agent.tokenizer.eval()
+        self.agent.world_model.requires_grad_(False)
+        self.agent.world_model.eval()
+        logger.info(
+            "Fixed-world-model mode is enabled: tokenizer/world_model are frozen and skipped during training."
+        )
+
     def run(self) -> None:
         for epoch in range(self.start_epoch, 1 + self.cfg.common.epochs):
             self.run_metadata.epoch = epoch
@@ -397,7 +411,10 @@ class Trainer:
                 if epoch <= self.cfg.collection.train.stop_after_epochs:
                     self.agent.eval()
                     collector_log = self.train_collector.collect(
-                        self.agent, epoch, **self.cfg.collection.train.config
+                        self.agent,
+                        epoch,
+                        disable_tqdm=self.cfg.common.disable_tqdm,
+                        **self.cfg.collection.train.config,
                     )
                     to_log += collector_log
                     logger.info(collector_log)
@@ -420,7 +437,10 @@ class Trainer:
                 del collection_kwargs[kw_to_del]
 
                 test_collect_log = self.test_collector.collect(
-                    self.agent, epoch, **collection_kwargs
+                    self.agent,
+                    epoch,
+                    disable_tqdm=self.cfg.common.disable_tqdm,
+                    **collection_kwargs,
                 )
                 to_log += test_collect_log
                 logger.info(test_collect_log)
@@ -473,7 +493,10 @@ class Trainer:
         del collection_kwargs[kw_to_del]
 
         test_collect_log = self.test_collector.collect(
-            self.agent, epoch, **collection_kwargs
+            self.agent,
+            epoch,
+            disable_tqdm=self.cfg.common.disable_tqdm,
+            **collection_kwargs,
         )
 
         logger.info(test_collect_log)
@@ -482,6 +505,10 @@ class Trainer:
 
     def train_agent(self, epoch: int) -> None:
         self.agent.train()
+        if self.cfg.training.fixed_world_model:
+            if self.agent.tokenizer is not None:
+                self.agent.tokenizer.eval()
+            self.agent.world_model.eval()
         self.agent.zero_grad()
 
         metrics_tokenizer, metrics_world_model, metrics_actor_critic = {}, {}, {}
@@ -490,7 +517,11 @@ class Trainer:
         cfg_world_model = self.cfg.training.world_model
         cfg_actor_critic = self.cfg.training.actor_critic
 
-        if self.agent.tokenizer is not None and self.agent.tokenizer.is_trainable:
+        if (
+            not self.cfg.training.fixed_world_model
+            and self.agent.tokenizer is not None
+            and self.agent.tokenizer.is_trainable
+        ):
             if epoch > cfg_tokenizer.start_after_epochs:
                 metrics_tokenizer = self.train_component(
                     epoch,
@@ -527,7 +558,10 @@ class Trainer:
                 **cfg_actor_critic,
             )
         self.agent.actor_critic.eval()
-        if epoch > cfg_world_model.start_after_epochs:
+        if (
+            not self.cfg.training.fixed_world_model
+            and epoch > cfg_world_model.start_after_epochs
+        ):
             metrics_world_model = self.train_component(
                 epoch,
                 self.agent.world_model,
@@ -623,7 +657,10 @@ class Trainer:
         data_iter = iter(dataloader)
 
         for _ in tqdm(
-            range(steps_per_epoch), desc=f"Training {str(component)}", file=sys.stdout
+            range(steps_per_epoch),
+            desc=f"Training {str(component)}",
+            file=sys.stdout,
+            disable=self.cfg.common.disable_tqdm,
         ):
             optimizer.zero_grad()
             for _ in range(grad_acc_steps):
@@ -778,7 +815,11 @@ class Trainer:
         intermediate_losses = defaultdict(float)
 
         steps = 0
-        pbar = tqdm(desc=f"Evaluating {str(component)}", file=sys.stdout)
+        pbar = tqdm(
+            desc=f"Evaluating {str(component)}",
+            file=sys.stdout,
+            disable=self.cfg.common.disable_tqdm,
+        )
         dataloader = get_dataloader(
             self.test_dataset,
             context_length,
@@ -909,13 +950,28 @@ class Trainer:
 
     def save_checkpoint(self, save_agent_only: bool) -> None:
         tmp_checkpoint_dir = Path("checkpoints_tmp")
+        prev_checkpoint_dir = Path("checkpoints_prev")
+        if tmp_checkpoint_dir.exists():
+            logger.warning("Removing stale checkpoints_tmp before saving a new checkpoint.")
+            shutil.rmtree(tmp_checkpoint_dir)
+        if prev_checkpoint_dir.exists():
+            shutil.rmtree(prev_checkpoint_dir)
         shutil.copytree(
             src=self.ckpt_dir,
             dst=tmp_checkpoint_dir,
             ignore=shutil.ignore_patterns("dataset"),
         )
-        self._save_checkpoint(save_agent_only)
-        shutil.rmtree(tmp_checkpoint_dir)
+        shutil.copytree(
+            src=tmp_checkpoint_dir,
+            dst=prev_checkpoint_dir,
+        )
+        try:
+            self._save_checkpoint(save_agent_only)
+        except Exception:
+            logger.exception("Checkpoint save failed; preserving checkpoints_tmp and checkpoints_prev for recovery.")
+            raise
+        else:
+            shutil.rmtree(tmp_checkpoint_dir)
 
     def load_checkpoint(self) -> None:
         assert self.ckpt_dir.is_dir()

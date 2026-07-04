@@ -16,6 +16,10 @@ from tqdm import tqdm
 
 from dataset import Batch
 from envs.world_model_env import POPWorldModelEnv
+from models.actor_critic.counterfactual import (
+    compute_counterfactual_group_advantages,
+    compute_uncertainty_weights,
+)
 from models.actor_critic.encoders import ObsEncoderBase
 from models.actor_critic.types import *
 from models.tokenizer import MultiModalTokenizer
@@ -28,6 +32,7 @@ from utils import (
     LSTMCellWrapper,
     ObsModality,
     HLGaussCategoricalRegressionHead,
+    RecurrentState,
 )
 from utils.types import MultiModalObs
 from utils.preprocessing import BufferScaler
@@ -364,6 +369,23 @@ class ActorCriticLS(nn.Module):
         imagine: bool,
         **kwargs: Any,
     ) -> tuple[LossWithIntermediateLosses, dict]:
+        actor_loss_mode = kwargs.get("actor_loss_mode", "dreamer")
+        if imagine and actor_loss_mode == "counterfactual_group":
+            return self._compute_counterfactual_group_loss(
+                batch=batch,
+                tokenizer=tokenizer,
+                world_model=world_model,
+                imagine_horizon=imagine_horizon,
+                gamma=gamma,
+                lambda_=lambda_,
+                entropy_weight=entropy_weight,
+                epoch=epoch,
+                actor_start_epoch=actor_start_epoch,
+                **kwargs,
+            )
+        if actor_loss_mode != "dreamer" and imagine:
+            raise ValueError(f"Unknown actor_loss_mode: {actor_loss_mode}")
+
         if imagine:
             outputs = self.imagine(
                 batch, tokenizer, world_model, horizon=imagine_horizon
@@ -426,6 +448,96 @@ class ActorCriticLS(nn.Module):
                 real_loss_values=loss_values,
                 real_loss_entropy=loss_entropy,
             )
+        return intermediatelosses, info
+
+    def _compute_counterfactual_group_loss(
+        self,
+        batch: Batch,
+        tokenizer: MultiModalTokenizer,
+        world_model: POPWorldModel,
+        imagine_horizon: int,
+        gamma: float,
+        lambda_: float,
+        entropy_weight: float,
+        epoch: int,
+        actor_start_epoch: int,
+        **kwargs: Any,
+    ) -> tuple[LossWithIntermediateLosses, dict]:
+        num_branches = int(kwargs.get("counterfactual_branches", 8))
+        if num_branches < 2:
+            raise ValueError("counterfactual_branches must be >= 2")
+
+        outputs, uncertainties = self.imagine_counterfactual_branches(
+            batch,
+            tokenizer,
+            world_model,
+            horizon=imagine_horizon,
+            num_branches=num_branches,
+        )
+
+        values_means = self._get_values_means(outputs.values_info)
+        with torch.no_grad():
+            lambda_returns = compute_lambda_returns(
+                rewards=outputs.rewards,
+                values=values_means,
+                ends=outputs.ends,
+                gamma=gamma,
+                lambda_=lambda_,
+            )[:, :-1]
+        self.return_scaler.update(lambda_returns)
+        returns_scale = torch.maximum(
+            torch.ones_like(self.return_scaler.scale), self.return_scaler.scale * 0.5
+        )
+
+        batch_size = batch["mask_padding"].shape[0]
+        values = values_means[:, :-1]
+        d = outputs.actions_distributions
+        log_probs = d.log_prob(outputs.actions)[:, :-1]
+        branch_returns = lambda_returns[:, 0].reshape(batch_size, num_branches)
+        group_advantage, group_baseline, group_std = compute_counterfactual_group_advantages(
+            branch_returns,
+            baseline=kwargs.get("counterfactual_baseline", "median"),
+            trim_ratio=float(kwargs.get("counterfactual_trim_ratio", 0.25)),
+            eps=float(kwargs.get("counterfactual_adv_eps", 1e-6)),
+        )
+        branch_uncertainty = uncertainties.mean(dim=2)
+        branch_weights = compute_uncertainty_weights(
+            branch_uncertainty,
+            beta=float(kwargs.get("counterfactual_uncertainty_beta", 1.0)),
+            min_weight=float(kwargs.get("counterfactual_uncertainty_weight_min", 0.05)),
+        )
+
+        anchor_log_probs = log_probs[:, 0].reshape(batch_size, num_branches)
+        loss_actions = -(
+            branch_weights.detach() * group_advantage.detach() * anchor_log_probs
+        ).mean()
+
+        entropy = d.entropy()
+        loss_entropy = -entropy_weight * entropy[:, 0].mean()
+        if epoch < actor_start_epoch:
+            loss_actions = torch.zeros_like(loss_actions)
+            loss_entropy = torch.zeros_like(loss_entropy)
+
+        loss_values = self._compute_critic_loss(outputs.values_info, lambda_returns)
+
+        info = {
+            "imagined_rewards": outputs.rewards.detach().clone(),
+            "imagined_returns": lambda_returns.detach().clone(),
+            "imagined_values": values.detach().clone(),
+            "imagined_normalized_advantage": group_advantage.detach().clone(),
+            "imagined_log_probs": anchor_log_probs.detach().clone(),
+            "imagined_returns_scale": returns_scale.item(),
+            "imagined_counterfactual_branch_returns": branch_returns.detach().clone(),
+            "imagined_counterfactual_baseline": group_baseline.detach().clone(),
+            "imagined_counterfactual_group_std": group_std.detach().clone(),
+            "imagined_counterfactual_uncertainty": branch_uncertainty.detach().clone(),
+            "imagined_counterfactual_weights": branch_weights.detach().clone(),
+        }
+        intermediatelosses = LossWithIntermediateLosses(
+            imagined_loss_actor=loss_actions,
+            imagined_loss_values=loss_values,
+            imagined_loss_entropy=loss_entropy,
+        )
         return intermediatelosses, info
 
     def _compute_critic_loss(
@@ -511,6 +623,137 @@ class ActorCriticLS(nn.Module):
                 ObsModality.vector.name
             ].decode(codes[ObsModality.vector])
         return codes
+
+    @staticmethod
+    def _repeat_multimodal_batch(items: MultiModalObs, repeats: int) -> MultiModalObs:
+        return {k: v.repeat_interleave(repeats, dim=0) for k, v in items.items()}
+
+    @staticmethod
+    def _repeat_rnn_state(state, repeats: int):
+        if state is None:
+            return None
+        if isinstance(state, tuple):
+            return tuple(ActorCriticLS._repeat_rnn_state(s, repeats) for s in state)
+        return state.repeat_interleave(repeats, dim=0)
+
+    @staticmethod
+    def _repeat_wm_recurrent_state(recurrent_state: Optional[RecurrentState], repeats: int):
+        if recurrent_state is None:
+            return None
+        state = recurrent_state.state
+        if state is not None:
+            state = state.repeat_interleave(repeats, dim=1)
+        n = recurrent_state.n
+        if isinstance(n, torch.Tensor):
+            n = n.repeat_interleave(repeats, dim=0)
+        return RecurrentState(state, n)
+
+    def _expand_wm_env_batch(self, wm_env: POPWorldModelEnv, repeats: int) -> None:
+        if wm_env.prior_context is not None:
+            wm_env.prior_context = wm_env.prior_context.repeat_interleave(
+                repeats, dim=0
+            )
+        if wm_env.last_obs_tokens is not None:
+            wm_env.last_obs_tokens = self._repeat_multimodal_batch(
+                wm_env.last_obs_tokens, repeats
+            )
+        if hasattr(wm_env, "last_obs_tokens_emb"):
+            wm_env.last_obs_tokens_emb = wm_env.last_obs_tokens_emb.repeat_interleave(
+                repeats, dim=0
+            )
+        wm_env.recurrent_state = self._repeat_wm_recurrent_state(
+            wm_env.recurrent_state, repeats
+        )
+
+    def imagine_counterfactual_branches(
+        self,
+        batch: Batch,
+        tokenizer: MultiModalTokenizer,
+        world_model: POPWorldModel,
+        horizon: int,
+        num_branches: int,
+        show_pbar: bool = False,
+    ) -> tuple[ImagineOutput, Tensor]:
+        mask_padding = batch["mask_padding"]
+        assert mask_padding[:, -1].all()
+        device = self.device
+
+        all_actions = []
+        all_actions_dists = []
+        all_values_info = []
+        all_rewards = []
+        all_ends = []
+        all_observations = []
+        all_uncertainties = []
+
+        wm_env, obs_tokens = self._imagination_set_initial_state(
+            batch, tokenizer, world_model
+        )
+        self.actor_state = self._repeat_rnn_state(self.actor_state, num_branches)
+        self.critic_state = self._repeat_rnn_state(self.critic_state, num_branches)
+        self._expand_wm_env_batch(wm_env, num_branches)
+        obs_tokens = self._repeat_multimodal_batch(obs_tokens, num_branches)
+        obs_codes = self._to_codes(obs_tokens, world_model, tokenizer)
+
+        effective_horizon = horizon - self.context_len + 1
+        for k in tqdm(
+            range(effective_horizon),
+            disable=not show_pbar,
+            desc="CounterfactualImagination",
+            file=sys.stdout,
+        ):
+            all_observations.append(obs_codes)
+
+            actor_outs, critic_outs = self(inputs=obs_codes)
+            action = actor_outs.get_actions_distributions().sample()
+            assert self.include_action_inputs
+            self.process_action(action.squeeze(1))
+            should_predict_next_obs = k < effective_horizon - 1
+            obs_tokens, reward, done, info = wm_env.step(
+                action,
+                should_predict_next_obs=should_predict_next_obs,
+                return_tokens=True,
+            )
+            obs_codes = (
+                self._to_codes(obs_tokens, world_model, tokenizer)
+                if should_predict_next_obs
+                else None
+            )
+
+            uncertainty = None
+            if isinstance(info, dict):
+                uncertainty = info.get("uncertainty")
+            if uncertainty is None:
+                uncertainty = torch.zeros_like(reward.reshape(-1, 1))
+
+            all_actions.append(action)
+            all_actions_dists.append(actor_outs.get_actions_distributions())
+            all_values_info.append(critic_outs.get_value_info())
+            all_rewards.append(reward.reshape(-1, 1))
+            all_ends.append(done.reshape(-1, 1))
+            all_uncertainties.append(uncertainty.reshape(-1, 1))
+
+        self.clear()
+
+        batch_size = batch["mask_padding"].shape[0]
+        uncertainties = torch.cat(all_uncertainties, dim=1).reshape(
+            batch_size, num_branches, effective_horizon
+        )
+        return (
+            ImagineOutput(
+                observations={
+                    k: torch.stack([o[k] for o in all_observations], dim=1)
+                    for k in self._ordered_modalities
+                },
+                actions=torch.cat(all_actions, dim=1),
+                actions_distributions=self._concat_distributions(all_actions_dists),
+                values_info=self._concat_values(all_values_info),
+                q_values_info=None,
+                rewards=torch.cat(all_rewards, dim=1).to(device),
+                ends=torch.cat(all_ends, dim=1).to(device),
+            ),
+            uncertainties,
+        )
 
     def imagine(
         self,
