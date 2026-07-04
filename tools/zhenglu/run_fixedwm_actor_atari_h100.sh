@@ -18,7 +18,9 @@ SOURCE_OUTPUT_PREFIX="${SOURCE_OUTPUT_PREFIX:-easimulus_atari_}"
 SOURCE_WORLD_MODEL_OVERRIDES="${SOURCE_WORLD_MODEL_OVERRIDES:-world_model.event_pred=True world_model.ges=True}"
 LOCK_HEARTBEAT_SECONDS="${LOCK_HEARTBEAT_SECONDS:-30}"
 LOCK_STALE_AFTER_SECONDS="${LOCK_STALE_AFTER_SECONDS:-300}"
+LOCK_TAKEOVER_ON_HOST_MISMATCH="${LOCK_TAKEOVER_ON_HOST_MISMATCH:-1}"
 CLEAN_DISABLED_VARIANTS="${CLEAN_DISABLED_VARIANTS:-1}"
+FORCE_CLEAN_DISABLED_VARIANTS="${FORCE_CLEAN_DISABLED_VARIANTS:-1}"
 DISABLED_VARIANTS="${DISABLED_VARIANTS:-cf_median_k8_u1}"
 ALLOW_NON_DREAMER_VARIANTS="${ALLOW_NON_DREAMER_VARIANTS:-0}"
 
@@ -165,8 +167,12 @@ cleanup_disabled_variant_outputs() {
         task_name="$(basename "${path}")"
         log_lock="${path}/run.lock"
         if [[ -d "${log_lock}" ]] && lock_is_active "${log_lock}"; then
-          echo "[actor-launch][cleanup][skip] active lock for ${task_name}: ${log_lock}"
-          continue
+          if [[ "${FORCE_CLEAN_DISABLED_VARIANTS}" == "1" ]]; then
+            echo "[actor-launch][cleanup][force] removing disabled variant despite active lock: ${task_name} owner=[$(lock_owner_summary "${log_lock}")]"
+          else
+            echo "[actor-launch][cleanup][skip] active lock for ${task_name}: ${log_lock}"
+            continue
+          fi
         fi
         echo "[actor-launch][cleanup] rm -rf ${path}"
         rm -rf -- "${path}"
@@ -178,8 +184,12 @@ cleanup_disabled_variant_outputs() {
         output_base="$(basename "${path}")"
         output_log_lock="${LOG_ROOT}/${output_base}/run.lock"
         if [[ -d "${output_log_lock}" ]] && lock_is_active "${output_log_lock}"; then
-          echo "[actor-launch][cleanup][skip] active lock for ${output_base}: ${output_log_lock}"
-          continue
+          if [[ "${FORCE_CLEAN_DISABLED_VARIANTS}" == "1" ]]; then
+            echo "[actor-launch][cleanup][force] removing disabled variant output despite active lock: ${output_base} owner=[$(lock_owner_summary "${output_log_lock}")]"
+          else
+            echo "[actor-launch][cleanup][skip] active lock for ${output_base}: ${output_log_lock}"
+            continue
+          fi
         fi
         echo "[actor-launch][cleanup] rm -rf ${path}"
         rm -rf -- "${path}"
@@ -384,6 +394,15 @@ lock_owner_summary() {
   fi
 }
 
+lock_owned_by_other_host() {
+  local lock_dir="$1"
+  local host this_host
+  host="$(cat "${lock_dir}/host" 2>/dev/null || true)"
+  [[ -n "${host}" ]] || return 1
+  this_host="$(lock_host)"
+  [[ "${host}" != "${this_host}" ]]
+}
+
 lock_is_active() {
   local lock_dir="$1"
   local pid host start current_start this_host
@@ -422,6 +441,17 @@ acquire_lock() {
     return 0
   fi
   if lock_is_active "${lock_dir}"; then
+    if [[ "${LOCK_TAKEOVER_ON_HOST_MISMATCH}" == "1" ]] && lock_owned_by_other_host "${lock_dir}"; then
+      echo "[actor-launch][resume] Taking over lock from different host: ${lock_dir} owner=[$(lock_owner_summary "${lock_dir}")]"
+      rm -rf "${lock_dir}"
+      if ! mkdir "${lock_dir}" 2>/dev/null; then
+        echo "[actor-launch][error] Failed to reacquire lock after host-mismatch takeover: ${lock_dir}"
+        return 1
+      fi
+      write_lock_metadata "${lock_dir}" "${task_name}"
+      start_lock_heartbeat "${lock_dir}"
+      return 0
+    fi
     echo "[actor-launch][error] Active lock exists: ${lock_dir} owner=[$(lock_owner_summary "${lock_dir}")]"
     return 1
   fi
@@ -624,6 +654,9 @@ echo "[actor-launch] tasks=${TASK_ARRAY[*]}"
 echo "[actor-launch] variants=${VARIANT_ARRAY[*]}"
 echo "[actor-launch] tasks_per_gpu=${TASKS_PER_GPU}"
 echo "[actor-launch] source_world_model_overrides=${SOURCE_WORLD_MODEL_OVERRIDES}"
+echo "[actor-launch] lock_takeover_on_host_mismatch=${LOCK_TAKEOVER_ON_HOST_MISMATCH}"
+echo "[actor-launch] clean_disabled_variants=${CLEAN_DISABLED_VARIANTS}"
+echo "[actor-launch] force_clean_disabled_variants=${FORCE_CLEAN_DISABLED_VARIANTS}"
 echo "[actor-launch] output_root=${OUTPUT_ROOT}"
 echo "[actor-launch] log_root=${LOG_ROOT}"
 echo "[actor-launch] Hero is disabled."
