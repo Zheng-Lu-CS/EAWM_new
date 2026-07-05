@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -164,6 +166,61 @@ def score_status(summary: LogSummary, min_epoch: int, stop_ratio: float) -> str:
     return "early"
 
 
+def metric(summary: LogSummary, name: str) -> float | None:
+    return summary.last_metrics.get(name)
+
+
+def summary_record(
+    summary: LogSummary, min_epoch: int, stop_ratio: float
+) -> dict[str, str | int | float | None]:
+    baselines = EAWM_ATARI_BASELINES.get(summary.game, {})
+    easim = baselines.get("EASimulus")
+    sim = baselines.get("Simulus")
+    return {
+        "run": summary.run,
+        "task": summary.task,
+        "game": summary.game,
+        "variant": summary.variant,
+        "source": summary.source_kind,
+        "source_run_dir": summary.source_run_dir,
+        "actor_epoch": summary.last_actor_epoch,
+        "last_test_epoch": summary.last_test_epoch,
+        "last_test_return": summary.last_test_return,
+        "best_test_epoch": summary.best_test_epoch,
+        "best_test_return": summary.best_test_return,
+        "easimulus": easim,
+        "best_over_easimulus": (
+            None
+            if summary.best_test_return is None or easim in {None, 0}
+            else summary.best_test_return / easim
+        ),
+        "simulus": sim,
+        "best_over_simulus": (
+            None
+            if summary.best_test_return is None or sim in {None, 0}
+            else summary.best_test_return / sim
+        ),
+        "dr_adv": metric(summary, "dr_adv"),
+        "dr_tgt": metric(summary, "dr_tgt"),
+        "dr_w": metric(summary, "dr_w"),
+        "q_loss": metric(summary, "q_loss"),
+        "imagined_return": metric(summary, "imagined_return"),
+        "tree_adv": metric(summary, "tree_adv"),
+        "tree_w": metric(summary, "tree_w"),
+        "tree_u": metric(summary, "tree_u"),
+        "tree_risk": metric(summary, "tree_risk"),
+        "tree_ent": metric(summary, "tree_ent"),
+        "tree_return_std": metric(summary, "tree_return_std"),
+        "errors": summary.errors,
+        "first_error": summary.first_error,
+        "status": score_status(summary, min_epoch, stop_ratio),
+    }
+
+
+def split_statuses(value: str) -> set[str]:
+    return {status for status in value.replace(",", " ").split() if status}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Summarize EASimulus actor logs against Atari baselines."
@@ -171,6 +228,12 @@ def main() -> None:
     parser.add_argument("paths", nargs="*", default=["logs"], help="Log roots or train.log files.")
     parser.add_argument("--min-epoch", type=int, default=200)
     parser.add_argument("--stop-ratio", type=float, default=0.5)
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    parser.add_argument(
+        "--fail-on",
+        default="",
+        help="Exit with status 2 if any row has one of these comma/space-separated statuses.",
+    )
     parser.add_argument(
         "--contains",
         default="",
@@ -187,7 +250,29 @@ def main() -> None:
             if needle in s.task.lower() or needle in s.run.lower() or needle in str(s.train_log).lower()
         ]
     summaries.sort(key=lambda s: (s.run, s.game, s.variant, str(s.train_log)))
+    records = [summary_record(s, args.min_epoch, args.stop_ratio) for s in summaries]
+    status_counts: dict[str, int] = {}
+    for record in records:
+        status = str(record["status"])
+        status_counts[status] = status_counts.get(status, 0) + 1
 
+    if args.json:
+        print(
+            json.dumps(
+                {"records": records, "status_counts": status_counts},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    else:
+        print_table(records)
+
+    fail_on = split_statuses(args.fail_on)
+    if fail_on and any(str(record["status"]) in fail_on for record in records):
+        sys.exit(2)
+
+
+def print_table(records: list[dict[str, str | int | float | None]]) -> None:
     header = [
         "run",
         "task",
@@ -214,35 +299,31 @@ def main() -> None:
         "status",
     ]
     print("\t".join(header))
-    for summary in summaries:
-        baselines = EAWM_ATARI_BASELINES.get(summary.game, {})
-        easim = baselines.get("EASimulus")
-        sim = baselines.get("Simulus")
-        metrics = summary.last_metrics
+    for record in records:
         row = [
-            summary.run,
-            summary.task,
-            summary.source_kind,
-            fmt(summary.last_actor_epoch),
-            f"{fmt(summary.last_test_return)}@{fmt(summary.last_test_epoch)}",
-            f"{fmt(summary.best_test_return)}@{fmt(summary.best_test_epoch)}",
-            fmt(easim),
-            ratio(summary.best_test_return, easim),
-            fmt(sim),
-            ratio(summary.best_test_return, sim),
-            fmt(metrics.get("dr_adv")),
-            fmt(metrics.get("dr_tgt")),
-            fmt(metrics.get("dr_w")),
-            fmt(metrics.get("q_loss")),
-            fmt(metrics.get("imagined_return")),
-            fmt(metrics.get("tree_adv")),
-            fmt(metrics.get("tree_w")),
-            fmt(metrics.get("tree_u")),
-            fmt(metrics.get("tree_risk")),
-            fmt(metrics.get("tree_ent")),
-            fmt(metrics.get("tree_return_std")),
-            str(summary.errors),
-            score_status(summary, args.min_epoch, args.stop_ratio),
+            str(record["run"]),
+            str(record["task"]),
+            str(record["source"]),
+            fmt(record["actor_epoch"]),
+            f"{fmt(record['last_test_return'])}@{fmt(record['last_test_epoch'])}",
+            f"{fmt(record['best_test_return'])}@{fmt(record['best_test_epoch'])}",
+            fmt(record["easimulus"]),
+            fmt(record["best_over_easimulus"]),
+            fmt(record["simulus"]),
+            fmt(record["best_over_simulus"]),
+            fmt(record["dr_adv"]),
+            fmt(record["dr_tgt"]),
+            fmt(record["dr_w"]),
+            fmt(record["q_loss"]),
+            fmt(record["imagined_return"]),
+            fmt(record["tree_adv"]),
+            fmt(record["tree_w"]),
+            fmt(record["tree_u"]),
+            fmt(record["tree_risk"]),
+            fmt(record["tree_ent"]),
+            fmt(record["tree_return_std"]),
+            str(record["errors"]),
+            str(record["status"]),
         ]
         print("\t".join(row))
 

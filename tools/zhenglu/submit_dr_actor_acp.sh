@@ -36,7 +36,7 @@ AUTO_RESUME=1 \
 bash ${LAUNCH_SCRIPT}; \
 launcher_rc=\$?; \
 set -e; \
-if [ '${ANALYZE_LOGS}' = '1' ]; then python tools/zhenglu/analyze_actor_logs.py logs --contains dr_actor_atari --min-epoch 200 || true; fi; \
+if [ '${ANALYZE_LOGS}' = '1' ]; then mkdir -p logs; python tools/zhenglu/analyze_actor_logs.py logs --contains dr_actor_atari --min-epoch 200 || true; python tools/zhenglu/analyze_actor_logs.py logs --contains dr_actor_atari --min-epoch 200 --json > logs/dr_actor_latest_summary.json || true; fi; \
 exit \${launcher_rc}"
 
 echo "[dr-acp] job_name=${JOB_NAME}"
