@@ -9,6 +9,7 @@ TIMESTAMP="${EXP_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
 TASKS="${TASKS:-Alien Assault Asterix Breakout}"
 VARIANTS="${VARIANTS:-dr_blend_topk_l4k4 dr_blend_mixed_l4k6}"
 SOURCE_WORLD_MODEL_OVERRIDES="${SOURCE_WORLD_MODEL_OVERRIDES:-world_model.event_pred=True world_model.ges=True}"
+EXTRA_HYDRA_OVERRIDES="${EXTRA_HYDRA_OVERRIDES:-}"
 FIXED_WM_SOURCE_ROOT="${FIXED_WM_SOURCE_ROOT:-${PROJECT_ROOT}/outputs}"
 ALLOW_BROAD_SOURCE_SEARCH="${ALLOW_BROAD_SOURCE_SEARCH:-0}"
 ALLOW_GAME_PATH_SOURCE_MATCH="${ALLOW_GAME_PATH_SOURCE_MATCH:-0}"
@@ -295,6 +296,7 @@ run_one() {
   variant_args_text="$(variant_args "${variant}")"
   read -r -a extra_args <<< "${variant_args_text}"
   read -r -a source_wm_args <<< "${SOURCE_WORLD_MODEL_OVERRIDES}"
+  read -r -a user_extra_args <<< "${EXTRA_HYDRA_OVERRIDES}"
 
   local cmd=(
     python src/main.py
@@ -327,6 +329,7 @@ run_one() {
     "collection.test.num_episodes_to_save=${MEDIA_EPISODES_TO_SAVE}"
     evaluation.tokenizer.save_reconstructions=False
     "${extra_args[@]}"
+    "${user_extra_args[@]}"
   )
 
   if [[ "${resume_flag}" == "true" ]]; then
@@ -401,6 +404,7 @@ echo "[dr-launch] source_root=${FIXED_WM_SOURCE_ROOT}"
 echo "[dr-launch] source_output_prefix=${SOURCE_OUTPUT_PREFIX}"
 echo "[dr-launch] allow_broad_source_search=${ALLOW_BROAD_SOURCE_SEARCH}"
 echo "[dr-launch] allow_game_path_source_match=${ALLOW_GAME_PATH_SOURCE_MATCH}"
+echo "[dr-launch] extra_hydra_overrides=${EXTRA_HYDRA_OVERRIDES}"
 echo "[dr-launch] resume_output_prefix=${RESUME_OUTPUT_PREFIX}"
 echo "[dr-launch] collect_real_prefix=${COLLECT_REAL_PREFIX}"
 echo "[dr-launch] dry_run=${DRY_RUN}"
