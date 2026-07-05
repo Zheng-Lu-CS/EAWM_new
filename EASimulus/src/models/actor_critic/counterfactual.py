@@ -36,6 +36,22 @@ def compute_uncertainty_weights(
     return torch.exp(-beta * uncertainty).clamp(min=min_weight, max=1.0)
 
 
+def scale_uncertainty_for_weights(
+    uncertainty: Tensor,
+    mode: str = "absolute",
+    eps: float = 1e-6,
+) -> Tensor:
+    assert uncertainty.ndim == 2, f"Expected (anchors, branches), got {uncertainty.shape}"
+    mode = mode.lower()
+    if mode == "absolute":
+        return uncertainty
+    if mode in {"relative", "anchor_relative"}:
+        center = uncertainty.median(dim=1, keepdim=True).values
+        scale = uncertainty.std(dim=1, unbiased=False, keepdim=True).clamp_min(eps)
+        return ((uncertainty - center) / scale).clamp_min(0.0)
+    raise ValueError(f"Unknown uncertainty weighting mode: {mode}")
+
+
 def robust_tree_backup(
     edge_returns: Tensor,
     mode: str = "lcb",

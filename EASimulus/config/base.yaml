@@ -125,6 +125,7 @@ training:
     treecf_adv_eps: 1e-6
     treecf_adv_clip: 5.0
     treecf_uncertainty_beta: 1.0
+    treecf_uncertainty_mode: absolute
     treecf_uncertainty_weight_min: 0.05
     treecf_depth_decay: 1.0
     treecf_depth_balance: True

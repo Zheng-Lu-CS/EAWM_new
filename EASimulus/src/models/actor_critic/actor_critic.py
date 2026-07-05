@@ -23,6 +23,7 @@ from models.actor_critic.counterfactual import (
     normalize_tree_advantages,
     robust_center,
     robust_tree_backup,
+    scale_uncertainty_for_weights,
     select_counterfactual_actions,
 )
 from models.actor_critic.encoders import ObsEncoderBase
@@ -1200,6 +1201,7 @@ class ActorCriticLS(nn.Module):
         adv_scale = kwargs.get("treecf_adv_scale", "std")
         baseline_mode = kwargs.get("treecf_adv_baseline", "median").lower()
         uncertainty_beta = float(kwargs.get("treecf_uncertainty_beta", 1.0))
+        uncertainty_mode = kwargs.get("treecf_uncertainty_mode", "absolute").lower()
         uncertainty_min_weight = float(kwargs.get("treecf_uncertainty_weight_min", 0.05))
         trim_ratio = float(kwargs.get("treecf_trim_ratio", 0.25))
 
@@ -1321,8 +1323,13 @@ class ActorCriticLS(nn.Module):
         branch_uncertainty = (
             uncertainty_sum / uncertainty_count.clamp_min(1.0)
         ).reshape(batch_size, branching)
-        weights = compute_uncertainty_weights(
+        uncertainty_for_weight = scale_uncertainty_for_weights(
             branch_uncertainty,
+            mode=uncertainty_mode,
+            eps=adv_eps,
+        )
+        weights = compute_uncertainty_weights(
+            uncertainty_for_weight,
             beta=uncertainty_beta,
             min_weight=uncertainty_min_weight,
         )
@@ -1346,6 +1353,7 @@ class ActorCriticLS(nn.Module):
             "imagined_treecf_advantages": advantages.detach().reshape(-1),
             "imagined_treecf_weights": weights.detach().reshape(-1),
             "imagined_treecf_uncertainty": branch_uncertainty.detach().reshape(-1),
+            "imagined_treecf_uncertainty_risk": uncertainty_for_weight.detach().reshape(-1),
             "imagined_treecf_log_probs": log_probs.detach().reshape(-1),
             "imagined_treecf_policy_probs": policy_probs.detach().reshape(-1),
             "imagined_treecf_depths": rollout_depths.detach(),

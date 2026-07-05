@@ -11,7 +11,8 @@ TASKS="${TASKS:-Alien Assault Asterix Breakout}"
 VARIANTS="${VARIANTS:-treecf_lcb_topk_d3b3 treecf_cvar_sample_d2b4}"
 SOURCE_WORLD_MODEL_OVERRIDES="${SOURCE_WORLD_MODEL_OVERRIDES:-world_model.event_pred=True world_model.ges=True}"
 FIXED_WM_SOURCE_ROOT="${FIXED_WM_SOURCE_ROOT:-${PROJECT_ROOT}/outputs}"
-ALLOW_SOURCE_ROOT_FALLBACK="${ALLOW_SOURCE_ROOT_FALLBACK:-1}"
+ALLOW_SOURCE_ROOT_FALLBACK="${ALLOW_SOURCE_ROOT_FALLBACK:-0}"
+ALLOW_GAME_PATH_SOURCE_MATCH="${ALLOW_GAME_PATH_SOURCE_MATCH:-0}"
 SOURCE_EXCLUDE_REGEX="${SOURCE_EXCLUDE_REGEX:-dense|ablation|eadense|edense|decision_aware_precision_router|dapr}"
 GPU_LIST="${GPU_LIST:-0 1 2 3}"
 LAUNCH_STAGGER_SECONDS="${LAUNCH_STAGGER_SECONDS:-10}"
@@ -27,6 +28,8 @@ RESUME_OUTPUT_PREFIX="${RESUME_OUTPUT_PREFIX:-${EXPERIMENT_PREFIX}_seed${SEED}_}
 LOAD_SOURCE_ACTOR="${LOAD_SOURCE_ACTOR:-0}"
 ACTOR_START_AFTER_EPOCHS="${ACTOR_START_AFTER_EPOCHS:-0}"
 ACTOR_LEARNING_RATE="${ACTOR_LEARNING_RATE:-}"
+TREECF_INTRINSIC_REWARD_WEIGHT="${TREECF_INTRINSIC_REWARD_WEIGHT:-0.0}"
+TREECF_EXTRA_OVERRIDES="${TREECF_EXTRA_OVERRIDES:-}"
 DRY_RUN="${DRY_RUN:-0}"
 
 EASIMULUS_DIR="${PROJECT_ROOT}/EASimulus"
@@ -201,6 +204,7 @@ source_override_var_name() {
 find_source_run_dir() {
   local game_short="$1"
   local game="${game_short}NoFrameskip-v4"
+  local exact_seed_segment="/${game_short}_seed${SEED}/"
   local line ckpt run_dir search_root override_var override_value source_pass
 
   override_var="$(source_override_var_name "${game_short}")"
@@ -227,7 +231,12 @@ find_source_run_dir() {
       run_dir="$(dirname "$(dirname "${ckpt}")")"
       [[ "${run_dir}" == *"/treecf_actor_atari_"* ]] && continue
       [[ "${run_dir}" == *"/fixedwm_actor_atari_"* ]] && continue
-      if [[ "${ckpt}" != *"/${game_short}_seed${SEED}/"* && "${ckpt}" != *"/${game}/"* ]]; then
+      if [[ "${ckpt}" != *"${exact_seed_segment}"* ]]; then
+        if [[ "${ALLOW_GAME_PATH_SOURCE_MATCH}" != "1" || "${ckpt}" != *"/${game}/"* ]]; then
+          continue
+        fi
+      fi
+      if [[ "${ckpt}" == *"/${game_short}_"*"_seed${SEED}/"* && "${ckpt}" != *"${exact_seed_segment}"* ]]; then
         continue
       fi
       if ! is_allowed_source_run_dir "${run_dir}"; then
@@ -328,6 +337,7 @@ run_one() {
   variant_args_text="$(variant_args "${variant}")"
   read -r -a extra_args <<< "${variant_args_text}"
   read -r -a source_wm_args <<< "${SOURCE_WORLD_MODEL_OVERRIDES}"
+  read -r -a treecf_extra_args <<< "${TREECF_EXTRA_OVERRIDES}"
   local actor_lr_args=()
   if [[ -n "${ACTOR_LEARNING_RATE}" ]]; then
     actor_lr_args=("training.actor_critic.learning_rate=${ACTOR_LEARNING_RATE}")
@@ -368,8 +378,10 @@ run_one() {
     evaluation.tokenizer.save_reconstructions=False
     "training.actor_critic.start_after_epochs=${ACTOR_START_AFTER_EPOCHS}"
     "training.actor_critic.real_start_after_epochs=${ACTOR_START_AFTER_EPOCHS}"
+    "training.actor_critic.intrinsic_reward_weight=${TREECF_INTRINSIC_REWARD_WEIGHT}"
     "${actor_lr_args[@]}"
     "${extra_args[@]}"
+    "${treecf_extra_args[@]}"
   )
 
   if [[ "${resume_flag}" == "true" ]]; then
@@ -450,12 +462,15 @@ echo "[treecf-launch] source_root=${FIXED_WM_SOURCE_ROOT}"
 echo "[treecf-launch] source_output_prefix=${SOURCE_OUTPUT_PREFIX}"
 echo "[treecf-launch] source_world_model_overrides=${SOURCE_WORLD_MODEL_OVERRIDES}"
 echo "[treecf-launch] allow_source_root_fallback=${ALLOW_SOURCE_ROOT_FALLBACK}"
+echo "[treecf-launch] allow_game_path_source_match=${ALLOW_GAME_PATH_SOURCE_MATCH}"
 echo "[treecf-launch] source_exclude_regex=${SOURCE_EXCLUDE_REGEX}"
 echo "[treecf-launch] resume_output_prefix=${RESUME_OUTPUT_PREFIX}"
 echo "[treecf-launch] collect_real_prefix=${COLLECT_REAL_PREFIX}"
 echo "[treecf-launch] load_source_actor=${LOAD_SOURCE_ACTOR_HYDRA}"
 echo "[treecf-launch] actor_start_after_epochs=${ACTOR_START_AFTER_EPOCHS}"
 echo "[treecf-launch] actor_learning_rate=${ACTOR_LEARNING_RATE:-<default>}"
+echo "[treecf-launch] treecf_intrinsic_reward_weight=${TREECF_INTRINSIC_REWARD_WEIGHT}"
+echo "[treecf-launch] treecf_extra_overrides=${TREECF_EXTRA_OVERRIDES:-<none>}"
 echo "[treecf-launch] dry_run=${DRY_RUN}"
 
 worker_id=0

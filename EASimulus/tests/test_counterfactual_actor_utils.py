@@ -15,6 +15,7 @@ from counterfactual import (  # noqa: E402
     normalize_counterfactual_advantages,
     robust_center,
     robust_tree_backup,
+    scale_uncertainty_for_weights,
     select_counterfactual_actions,
 )
 
@@ -61,6 +62,16 @@ class CounterfactualActorUtilsTest(unittest.TestCase):
         uncertainty = torch.tensor([[0.0, 10.0]])
         weights = compute_uncertainty_weights(uncertainty, beta=0.0)
         self.assertTrue(torch.equal(weights, torch.ones_like(uncertainty)))
+
+    def test_relative_uncertainty_scaling_penalizes_high_risk_branches(self):
+        uncertainty = torch.tensor([[0.01, 0.02, 0.05], [0.03, 0.03, 0.03]])
+        absolute = scale_uncertainty_for_weights(uncertainty, mode="absolute")
+        relative = scale_uncertainty_for_weights(uncertainty, mode="relative")
+        self.assertTrue(torch.equal(absolute, uncertainty))
+        self.assertEqual(relative[0, 0].item(), 0.0)
+        self.assertEqual(relative[0, 1].item(), 0.0)
+        self.assertGreater(relative[0, 2].item(), 0.0)
+        self.assertTrue(torch.equal(relative[1], torch.zeros_like(relative[1])))
 
     def test_unknown_backup_mode_raises(self):
         with self.assertRaises(ValueError):
