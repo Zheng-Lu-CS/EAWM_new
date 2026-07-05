@@ -6,6 +6,7 @@ ENV_NAME="${ENV_NAME:-zhenglu_easimulus}"
 SEED="${SEED:-0}"
 WANDB_MODE="${WANDB_MODE:-offline}"
 TIMESTAMP="${EXP_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
+EXPERIMENT_PREFIX="${EXPERIMENT_PREFIX:-treecf_actor_atari}"
 TASKS="${TASKS:-Alien Assault Asterix Breakout}"
 VARIANTS="${VARIANTS:-treecf_lcb_topk_d3b3 treecf_cvar_sample_d2b4}"
 SOURCE_WORLD_MODEL_OVERRIDES="${SOURCE_WORLD_MODEL_OVERRIDES:-world_model.event_pred=True world_model.ges=True}"
@@ -22,14 +23,17 @@ EPOCHS="${EPOCHS:-600}"
 ACTOR_STEPS_PER_EPOCH="${ACTOR_STEPS_PER_EPOCH:-80}"
 COLLECT_REAL_PREFIX="${COLLECT_REAL_PREFIX:-0}"
 SOURCE_OUTPUT_PREFIX="${SOURCE_OUTPUT_PREFIX:-easimulus_atari_}"
-RESUME_OUTPUT_PREFIX="${RESUME_OUTPUT_PREFIX:-treecf_actor_atari_seed${SEED}_}"
+RESUME_OUTPUT_PREFIX="${RESUME_OUTPUT_PREFIX:-${EXPERIMENT_PREFIX}_seed${SEED}_}"
+LOAD_SOURCE_ACTOR="${LOAD_SOURCE_ACTOR:-0}"
+ACTOR_START_AFTER_EPOCHS="${ACTOR_START_AFTER_EPOCHS:-0}"
+ACTOR_LEARNING_RATE="${ACTOR_LEARNING_RATE:-}"
 DRY_RUN="${DRY_RUN:-0}"
 
 EASIMULUS_DIR="${PROJECT_ROOT}/EASimulus"
 TOOLS_DIR="${PROJECT_ROOT}/tools/zhenglu"
 MONITOR_SCRIPT="${TOOLS_DIR}/monitor_easimulus_metrics.py"
-LOG_ROOT="${PROJECT_ROOT}/logs/treecf_actor_atari_seed${SEED}_${TIMESTAMP}"
-OUTPUT_ROOT="${PROJECT_ROOT}/outputs/treecf_actor_atari_seed${SEED}_${TIMESTAMP}"
+LOG_ROOT="${PROJECT_ROOT}/logs/${EXPERIMENT_PREFIX}_seed${SEED}_${TIMESTAMP}"
+OUTPUT_ROOT="${PROJECT_ROOT}/outputs/${EXPERIMENT_PREFIX}_seed${SEED}_${TIMESTAMP}"
 MASTER_LOG="${LOG_ROOT}/launcher.log"
 
 mkdir -p "${LOG_ROOT}" "${OUTPUT_ROOT}" \
@@ -57,6 +61,15 @@ declare -a TASK_ARRAY=()
 declare -a VARIANT_ARRAY=()
 declare -a GPU_ARRAY=()
 declare -a WORKER_PIDS=()
+
+case "${LOAD_SOURCE_ACTOR,,}" in
+  1|true|yes|y)
+    LOAD_SOURCE_ACTOR_HYDRA=True
+    ;;
+  *)
+    LOAD_SOURCE_ACTOR_HYDRA=False
+    ;;
+esac
 
 activate_conda() {
   if [[ "${SKIP_CONDA:-0}" == "1" ]]; then
@@ -315,6 +328,10 @@ run_one() {
   variant_args_text="$(variant_args "${variant}")"
   read -r -a extra_args <<< "${variant_args_text}"
   read -r -a source_wm_args <<< "${SOURCE_WORLD_MODEL_OVERRIDES}"
+  local actor_lr_args=()
+  if [[ -n "${ACTOR_LEARNING_RATE}" ]]; then
+    actor_lr_args=("training.actor_critic.learning_rate=${ACTOR_LEARNING_RATE}")
+  fi
 
   local train_stop_after
   train_stop_after="${COLLECT_REAL_PREFIX}"
@@ -337,18 +354,21 @@ run_one() {
     "initialization.agent.path_to_checkpoint=${source_run_dir}/checkpoints/last.pt"
     initialization.agent.load_tokenizer=True
     initialization.agent.load_world_model=True
-    initialization.agent.load_actor_critic=False
+    "initialization.agent.load_actor_critic=${LOAD_SOURCE_ACTOR_HYDRA}"
     "initialization.dataset.path=${source_run_dir}/checkpoints/dataset"
     "wandb.mode=${WANDB_MODE}"
     "wandb.id=${task_name}-seed${SEED}"
     wandb.resume=allow
     "wandb.name=${task_name}-seed${SEED}"
-    "wandb.group=treecf_actor_atari_seed${SEED}_${TIMESTAMP}"
+    "wandb.group=${EXPERIMENT_PREFIX}_seed${SEED}_${TIMESTAMP}"
     "outputs_dir_path=${task_output}"
     "hydra.run.dir=${run_dir}"
     "collection.train.num_episodes_to_save=${MEDIA_EPISODES_TO_SAVE}"
     "collection.test.num_episodes_to_save=${MEDIA_EPISODES_TO_SAVE}"
     evaluation.tokenizer.save_reconstructions=False
+    "training.actor_critic.start_after_epochs=${ACTOR_START_AFTER_EPOCHS}"
+    "training.actor_critic.real_start_after_epochs=${ACTOR_START_AFTER_EPOCHS}"
+    "${actor_lr_args[@]}"
     "${extra_args[@]}"
   )
 
@@ -420,6 +440,7 @@ cd "${EASIMULUS_DIR}"
 check_inputs
 
 echo "[treecf-launch] timestamp=${TIMESTAMP}"
+echo "[treecf-launch] experiment_prefix=${EXPERIMENT_PREFIX}"
 echo "[treecf-launch] tasks=${TASK_ARRAY[*]}"
 echo "[treecf-launch] gpu_list=${GPU_ARRAY[*]}"
 echo "[treecf-launch] variants=${VARIANT_ARRAY[*]}"
@@ -432,6 +453,9 @@ echo "[treecf-launch] allow_source_root_fallback=${ALLOW_SOURCE_ROOT_FALLBACK}"
 echo "[treecf-launch] source_exclude_regex=${SOURCE_EXCLUDE_REGEX}"
 echo "[treecf-launch] resume_output_prefix=${RESUME_OUTPUT_PREFIX}"
 echo "[treecf-launch] collect_real_prefix=${COLLECT_REAL_PREFIX}"
+echo "[treecf-launch] load_source_actor=${LOAD_SOURCE_ACTOR_HYDRA}"
+echo "[treecf-launch] actor_start_after_epochs=${ACTOR_START_AFTER_EPOCHS}"
+echo "[treecf-launch] actor_learning_rate=${ACTOR_LEARNING_RATE:-<default>}"
 echo "[treecf-launch] dry_run=${DRY_RUN}"
 
 worker_id=0
