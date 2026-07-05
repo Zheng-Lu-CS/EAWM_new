@@ -96,8 +96,8 @@ import torch
 print(torch.cuda.device_count())
 PY
 )"
-  if (( gpu_count < 4 )); then
-    echo "[dr-launch][error] Need at least 4 visible CUDA devices; found ${gpu_count}."
+  if (( gpu_count < ${#TASK_ARRAY[@]} )); then
+    echo "[dr-launch][error] Need at least ${#TASK_ARRAY[@]} visible CUDA device(s) for ${#TASK_ARRAY[@]} task(s); found ${gpu_count}."
     exit 1
   fi
 }
