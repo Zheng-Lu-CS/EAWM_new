@@ -143,8 +143,6 @@ is_valid_actor_run_dir() {
   [[ -f "${run_dir}/checkpoints/run_metadata.pt" ]] || return 1
   [[ -f "${run_dir}/checkpoints/last.pt" ]] || return 1
   [[ -f "${run_dir}/checkpoints/optimizer.pt" ]] || return 1
-  [[ -d "${run_dir}/checkpoints/dataset" ]] || return 1
-  find "${run_dir}/checkpoints/dataset" -maxdepth 1 -type f -name '*.pt' -print -quit 2>/dev/null | grep -q . || return 1
   return 0
 }
 
