@@ -85,6 +85,7 @@ def print_metric(task: str, epoch: int | None, name: str, pairs: dict[str, float
             f"tree_adv={fmt(pairs.get('actor_critic/train/imagined_treecf_advantages_mean'))} "
             f"tree_w={fmt(pairs.get('actor_critic/train/imagined_treecf_weights_mean'))} "
             f"tree_u={fmt(pairs.get('actor_critic/train/imagined_treecf_uncertainty_mean'))} "
+            f"tree_risk={fmt(pairs.get('actor_critic/train/imagined_treecf_uncertainty_risk_mean'))} "
             f"tree_root={fmt(pairs.get('actor_critic/train/imagined_treecf_root_values_mean'))} "
             f"tree_prob={fmt(pairs.get('actor_critic/train/imagined_treecf_policy_probs_mean'))} "
             f"tree_ent={fmt(pairs.get('actor_critic/train/imagined_treecf_entropy_mean'))} "
