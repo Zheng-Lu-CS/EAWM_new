@@ -610,12 +610,16 @@ class ActorCriticLS(nn.Module):
         values = self._get_values_means(values_info)
         return values.reshape(values.shape[0], -1)[:, :1]
 
-    def _compute_dr_q_values(self, critic_latent: Tensor) -> Tensor:
+    def _compute_dr_q_values(
+        self, critic_latent: Tensor, detach_latent: bool = False
+    ) -> Tensor:
         q_head = getattr(self, "dr_q_head", None)
         if q_head is None:
             raise ValueError(
                 "doubly_robust_counterfactual requires training.actor_critic.dr_q_head=True"
             )
+        if detach_latent:
+            critic_latent = critic_latent.detach()
         return q_head(critic_latent)
 
     def _build_doubly_robust_counterfactual_actor_loss(
@@ -661,6 +665,7 @@ class ActorCriticLS(nn.Module):
         q_loss_type = kwargs.get("dr_q_loss_type", "mse").lower()
         q_huber_delta = float(kwargs.get("dr_q_huber_delta", 1.0))
         q_target_clip = float(kwargs.get("dr_q_target_clip", 0.0))
+        q_detach_latent = bool(kwargs.get("dr_q_detach_latent", False))
         real_first_residual = bool(kwargs.get("dr_real_first_residual", False))
         force_replay_action = bool(
             kwargs.get("dr_force_replay_action", real_first_residual)
@@ -698,7 +703,9 @@ class ActorCriticLS(nn.Module):
             )
         )
         v0 = self._values_to_column(critic_outs.get_value_info())
-        q0_all = self._compute_dr_q_values(self.get_critic_rnn_output())
+        q0_all = self._compute_dr_q_values(
+            self.get_critic_rnn_output(), detach_latent=q_detach_latent
+        )
         q0_selected = q0_all.gather(1, actions)
         anchor_entropy = actions_dist.entropy().reshape(batch_size, -1)[:, 0]
 
@@ -837,7 +844,9 @@ class ActorCriticLS(nn.Module):
             if step < rollout_horizon - 1:
                 next_actions_dist = next_actor_outs.get_actions_distributions()
                 next_actions = next_actions_dist.sample().reshape(-1)
-                next_q_all = self._compute_dr_q_values(self.get_critic_rnn_output())
+                next_q_all = self._compute_dr_q_values(
+                    self.get_critic_rnn_output(), detach_latent=q_detach_latent
+                )
                 current_q = next_q_all.gather(1, next_actions.reshape(-1, 1)).reshape(-1)
                 current_actions = next_actions.reshape(-1, 1)
 
