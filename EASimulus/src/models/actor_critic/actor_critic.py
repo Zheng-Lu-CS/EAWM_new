@@ -728,6 +728,9 @@ class ActorCriticLS(nn.Module):
                 real_next_tokens = world_model.get_obs_tokens(
                     real_next_obs, tokenizer=tokenizer
                 )
+                real_next_tokens = {
+                    k: v[:, 0] for k, v in real_next_tokens.items()
+                }
                 real_next_codes = self._to_codes(
                     real_next_tokens, world_model, tokenizer
                 )
