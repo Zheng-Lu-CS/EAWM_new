@@ -143,6 +143,9 @@ training:
     dr_uncertainty_weight_min: 0.05
     dr_q_head: False
     dr_q_loss_weight: 0.5
+    dr_q_loss_type: mse
+    dr_q_huber_delta: 1.0
+    dr_q_target_clip: 0.0
     dr_real_first_residual: False
     dr_force_replay_action: False
     dr_is_clip: 2.0

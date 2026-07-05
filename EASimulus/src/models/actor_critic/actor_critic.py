@@ -658,6 +658,9 @@ class ActorCriticLS(nn.Module):
         uncertainty_min_weight = float(kwargs.get("dr_uncertainty_weight_min", 0.05))
         trim_ratio = float(kwargs.get("dr_trim_ratio", 0.25))
         is_clip = float(kwargs.get("dr_is_clip", 2.0))
+        q_loss_type = kwargs.get("dr_q_loss_type", "mse").lower()
+        q_huber_delta = float(kwargs.get("dr_q_huber_delta", 1.0))
+        q_target_clip = float(kwargs.get("dr_q_target_clip", 0.0))
         real_first_residual = bool(kwargs.get("dr_real_first_residual", False))
         force_replay_action = bool(
             kwargs.get("dr_force_replay_action", real_first_residual)
@@ -822,7 +825,12 @@ class ActorCriticLS(nn.Module):
             uncertainty_count = uncertainty_count + active.float()
 
             q_preds.append(current_q_2d.reshape(-1))
-            q_targets.append(td_targets.detach().reshape(-1))
+            q_target_for_loss = td_targets.detach()
+            if q_target_clip > 0:
+                q_target_for_loss = q_target_for_loss.clamp(
+                    min=-q_target_clip, max=q_target_clip
+                )
+            q_targets.append(q_target_for_loss.reshape(-1))
             q_masks.append(active.reshape(-1))
 
             alive = alive & done.logical_not()
@@ -837,7 +845,18 @@ class ActorCriticLS(nn.Module):
         q_targets = torch.cat(q_targets)
         q_masks = torch.cat(q_masks)
         if q_masks.any().item():
-            q_loss = F.mse_loss(q_preds[q_masks], q_targets[q_masks])
+            q_preds_active = q_preds[q_masks]
+            q_targets_active = q_targets[q_masks]
+            if q_loss_type in {"huber", "smooth_l1"}:
+                q_loss = F.smooth_l1_loss(
+                    q_preds_active,
+                    q_targets_active,
+                    beta=max(q_huber_delta, 1e-6),
+                )
+            elif q_loss_type == "mse":
+                q_loss = F.mse_loss(q_preds_active, q_targets_active)
+            else:
+                raise ValueError(f"Unknown dr_q_loss_type: {q_loss_type}")
         else:
             q_loss = torch.zeros_like(q_preds.mean())
 
@@ -885,6 +904,7 @@ class ActorCriticLS(nn.Module):
             "imagined_dr_policy_probs": policy_probs.detach().reshape(-1),
             "imagined_dr_is_ratio": is_ratio.detach().reshape(-1),
             "imagined_dr_replay_action_mask": replay_action_mask.float().reshape(-1),
+            "imagined_dr_q_preds": q_preds.detach(),
             "imagined_dr_q_targets": q_targets.detach(),
         }
         return loss_actions, loss_entropy, q_loss, dr_info
