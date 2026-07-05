@@ -18,6 +18,8 @@ from dataset import Batch
 from envs.world_model_env import POPWorldModelEnv
 from models.actor_critic.counterfactual import (
     apply_hybrid_first_residual,
+    blend_counterfactual_advantages,
+    compute_branch_lambda_returns,
     compute_uncertainty_weights,
     normalize_counterfactual_advantages,
     normalize_tree_advantages,
@@ -660,6 +662,8 @@ class ActorCriticLS(nn.Module):
         adv_scale = kwargs.get("dr_adv_scale", "std")
         uncertainty_beta = float(kwargs.get("dr_uncertainty_beta", 1.0))
         uncertainty_min_weight = float(kwargs.get("dr_uncertainty_weight_min", 0.05))
+        uncertainty_mode = kwargs.get("dr_uncertainty_mode", "absolute")
+        return_weight = float(kwargs.get("dr_return_weight", 0.0))
         trim_ratio = float(kwargs.get("dr_trim_ratio", 0.25))
         is_clip = float(kwargs.get("dr_is_clip", 2.0))
         q_loss_type = kwargs.get("dr_q_loss_type", "mse").lower()
@@ -780,6 +784,10 @@ class ActorCriticLS(nn.Module):
         q_preds = []
         q_targets = []
         q_masks = []
+        branch_rewards = []
+        branch_next_values = []
+        branch_dones = []
+        branch_active = []
 
         for step in range(rollout_horizon):
             self.process_action(current_actions.squeeze(1))
@@ -823,6 +831,30 @@ class ActorCriticLS(nn.Module):
                     real_first_targets.expand_as(td_targets),
                     td_targets,
                 )
+
+            return_rewards = reward.reshape(batch_size, branching)
+            return_dones = done.reshape(batch_size, branching)
+            return_next_values = next_values.reshape(batch_size, branching)
+            if step == 0 and real_first_residual:
+                return_rewards = torch.where(
+                    replay_action_mask,
+                    real_rewards.expand_as(return_rewards),
+                    return_rewards,
+                )
+                return_dones = torch.where(
+                    replay_action_mask,
+                    real_ends.expand_as(return_dones),
+                    return_dones,
+                )
+                return_next_values = torch.where(
+                    replay_action_mask,
+                    real_next_values.expand_as(return_next_values),
+                    return_next_values,
+                )
+            branch_rewards.append((return_rewards * active.float()).detach())
+            branch_next_values.append(return_next_values.detach())
+            branch_dones.append(return_dones.detach())
+            branch_active.append(active.detach())
 
             discount = (gamma * lambda_) ** step
             residual_sum = residual_sum + discount * residuals.detach() * active.float()
@@ -870,22 +902,53 @@ class ActorCriticLS(nn.Module):
             q_loss = torch.zeros_like(q_preds.mean())
 
         dr_advantages = (q0_selected.detach() - v0.detach()) + residual_sum
+        model_returns = compute_branch_lambda_returns(
+            rewards=torch.stack(branch_rewards, dim=0),
+            next_values=torch.stack(branch_next_values, dim=0),
+            dones=torch.stack(branch_dones, dim=0),
+            active=torch.stack(branch_active, dim=0),
+            gamma=gamma,
+            lambda_=lambda_,
+        )
+        model_advantages = model_returns - v0.detach()
         centers = robust_center(
             dr_advantages,
             mode=center_mode,
             trim_ratio=trim_ratio,
         )
         centered_advantages = dr_advantages - centers
-        normalized_advantages = normalize_counterfactual_advantages(
+        formula_normalized_advantages = normalize_counterfactual_advantages(
             centered_advantages,
             eps=adv_eps,
             clip=adv_clip,
             scale=adv_scale,
         )
+        model_centers = robust_center(
+            model_advantages,
+            mode=center_mode,
+            trim_ratio=trim_ratio,
+        )
+        model_centered_advantages = model_advantages - model_centers
+        model_normalized_advantages = normalize_counterfactual_advantages(
+            model_centered_advantages,
+            eps=adv_eps,
+            clip=adv_clip,
+            scale=adv_scale,
+        )
+        normalized_advantages = blend_counterfactual_advantages(
+            formula_normalized_advantages,
+            model_normalized_advantages,
+            auxiliary_weight=return_weight,
+        )
 
         branch_uncertainty = uncertainty_sum / uncertainty_count.clamp_min(1.0)
-        weights = compute_uncertainty_weights(
+        scaled_uncertainty = scale_uncertainty_for_weights(
             branch_uncertainty,
+            mode=uncertainty_mode,
+            eps=adv_eps,
+        )
+        weights = compute_uncertainty_weights(
+            scaled_uncertainty,
             beta=uncertainty_beta,
             min_weight=uncertainty_min_weight,
         )
@@ -904,11 +967,19 @@ class ActorCriticLS(nn.Module):
             "imagined_dr_advantages": normalized_advantages.detach().reshape(-1),
             "imagined_dr_raw_advantages": dr_advantages.detach().reshape(-1),
             "imagined_dr_centered_advantages": centered_advantages.detach().reshape(-1),
+            "imagined_dr_formula_advantages": formula_normalized_advantages.detach().reshape(-1),
+            "imagined_dr_model_advantages": model_normalized_advantages.detach().reshape(-1),
+            "imagined_dr_model_returns": model_returns.detach().reshape(-1),
+            "imagined_dr_return_weight": torch.full_like(
+                normalized_advantages.detach().reshape(-1),
+                fill_value=return_weight,
+            ),
             "imagined_dr_residuals": residual_sum.detach().reshape(-1),
             "imagined_dr_q_values": q0_selected.detach().reshape(-1),
             "imagined_dr_v_values": v0.detach().expand_as(q0_selected).reshape(-1),
             "imagined_dr_weights": weights.detach().reshape(-1),
             "imagined_dr_uncertainty": branch_uncertainty.detach().reshape(-1),
+            "imagined_dr_scaled_uncertainty": scaled_uncertainty.detach().reshape(-1),
             "imagined_dr_log_probs": log_probs.detach().reshape(-1),
             "imagined_dr_policy_probs": policy_probs.detach().reshape(-1),
             "imagined_dr_is_ratio": is_ratio.detach().reshape(-1),

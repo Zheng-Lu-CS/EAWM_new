@@ -7,7 +7,7 @@ SEED="${SEED:-0}"
 WANDB_MODE="${WANDB_MODE:-offline}"
 TIMESTAMP="${EXP_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
 TASKS="${TASKS:-Alien Assault Asterix Breakout}"
-VARIANTS="${VARIANTS:-dr_q_topk_l4k4 dr_hybrid_sample_l3k6}"
+VARIANTS="${VARIANTS:-dr_blend_topk_l4k4 dr_blend_mixed_l4k6}"
 SOURCE_WORLD_MODEL_OVERRIDES="${SOURCE_WORLD_MODEL_OVERRIDES:-world_model.event_pred=True world_model.ges=True}"
 FIXED_WM_SOURCE_ROOT="${FIXED_WM_SOURCE_ROOT:-${PROJECT_ROOT}/outputs}"
 ALLOW_BROAD_SOURCE_SEARCH="${ALLOW_BROAD_SOURCE_SEARCH:-0}"
@@ -225,6 +225,12 @@ variant_args() {
       ;;
     dr_mixed_l4k6)
       echo "training.actor_critic.actor_loss_mode=doubly_robust_counterfactual training.actor_critic.dr_q_head=True training.actor_critic.batch_num_samples=${DR_MIXED_BATCH_NUM_SAMPLES:-12} training.actor_critic.dr_branching=6 training.actor_critic.dr_rollout_horizon=4 training.actor_critic.dr_candidate_mode=mixed training.actor_critic.dr_sample_temperature=1.2 training.actor_critic.dr_center=median training.actor_critic.dr_adv_scale=mad training.actor_critic.dr_uncertainty_beta=0.75 training.actor_critic.dr_q_loss_weight=0.75 training.actor_critic.dr_q_loss_type=huber training.actor_critic.dr_q_huber_delta=1.0 training.actor_critic.dr_q_target_clip=20.0 training.actor_critic.dr_q_detach_latent=True training.actor_critic.dr_real_first_residual=False training.actor_critic.dr_force_replay_action=False training.actor_critic.dr_is_clip=1.5 training.actor_critic.entropy_weight=0.002"
+      ;;
+    dr_blend_topk_l4k4)
+      echo "training.actor_critic.actor_loss_mode=doubly_robust_counterfactual training.actor_critic.dr_q_head=True training.actor_critic.batch_num_samples=${DR_BLEND_TOPK_BATCH_NUM_SAMPLES:-16} training.actor_critic.dr_branching=4 training.actor_critic.dr_rollout_horizon=4 training.actor_critic.dr_candidate_mode=topk training.actor_critic.dr_center=median training.actor_critic.dr_adv_scale=std training.actor_critic.dr_adv_clip=3.0 training.actor_critic.dr_uncertainty_beta=0.75 training.actor_critic.dr_uncertainty_mode=relative training.actor_critic.dr_uncertainty_weight_min=0.2 training.actor_critic.dr_return_weight=0.35 training.actor_critic.dr_q_loss_weight=1.0 training.actor_critic.dr_q_loss_type=huber training.actor_critic.dr_q_huber_delta=1.0 training.actor_critic.dr_q_target_clip=20.0 training.actor_critic.dr_q_detach_latent=True training.actor_critic.dr_real_first_residual=False training.actor_critic.dr_force_replay_action=False training.actor_critic.dr_is_clip=2.0 training.actor_critic.entropy_weight=0.0015"
+      ;;
+    dr_blend_mixed_l4k6)
+      echo "training.actor_critic.actor_loss_mode=doubly_robust_counterfactual training.actor_critic.dr_q_head=True training.actor_critic.batch_num_samples=${DR_BLEND_MIXED_BATCH_NUM_SAMPLES:-12} training.actor_critic.dr_branching=6 training.actor_critic.dr_rollout_horizon=4 training.actor_critic.dr_candidate_mode=mixed training.actor_critic.dr_sample_temperature=1.25 training.actor_critic.dr_center=median training.actor_critic.dr_adv_scale=mad training.actor_critic.dr_adv_clip=3.0 training.actor_critic.dr_uncertainty_beta=0.5 training.actor_critic.dr_uncertainty_mode=relative training.actor_critic.dr_uncertainty_weight_min=0.2 training.actor_critic.dr_return_weight=0.45 training.actor_critic.dr_q_loss_weight=1.0 training.actor_critic.dr_q_loss_type=huber training.actor_critic.dr_q_huber_delta=1.0 training.actor_critic.dr_q_target_clip=20.0 training.actor_critic.dr_q_detach_latent=True training.actor_critic.dr_real_first_residual=False training.actor_critic.dr_force_replay_action=False training.actor_critic.dr_is_clip=1.5 training.actor_critic.entropy_weight=0.002"
       ;;
     *)
       echo "[dr-launch][error] Unsupported variant '${variant}'." >&2

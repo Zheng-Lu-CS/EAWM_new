@@ -140,7 +140,9 @@ training:
     dr_adv_clip: 5.0
     dr_adv_scale: std
     dr_uncertainty_beta: 1.0
+    dr_uncertainty_mode: absolute
     dr_uncertainty_weight_min: 0.05
+    dr_return_weight: 0.0
     dr_q_head: False
     dr_q_loss_weight: 0.5
     dr_q_loss_type: mse

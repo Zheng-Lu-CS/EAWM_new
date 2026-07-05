@@ -118,6 +118,43 @@ def normalize_counterfactual_advantages(
     return normalized
 
 
+def blend_counterfactual_advantages(
+    primary: Tensor,
+    auxiliary: Tensor,
+    auxiliary_weight: float = 0.0,
+) -> Tensor:
+    assert primary.shape == auxiliary.shape
+    auxiliary_weight = float(auxiliary_weight)
+    if auxiliary_weight <= 0:
+        return primary
+    if auxiliary_weight >= 1:
+        return auxiliary
+    return (1.0 - auxiliary_weight) * primary + auxiliary_weight * auxiliary
+
+
+def compute_branch_lambda_returns(
+    rewards: Tensor,
+    next_values: Tensor,
+    dones: Tensor,
+    active: Tensor,
+    gamma: float,
+    lambda_: float,
+) -> Tensor:
+    assert rewards.ndim == 3, f"Expected (steps, anchors, branches), got {rewards.shape}"
+    assert next_values.shape == rewards.shape
+    assert dones.shape == rewards.shape
+    assert active.shape == rewards.shape
+    bootstrap = next_values[-1]
+    for step in range(rewards.shape[0] - 1, -1, -1):
+        active_step = active[step].bool()
+        not_done = dones[step].logical_not().float() * active[step].float()
+        candidate = rewards[step] + gamma * not_done * (
+            (1.0 - lambda_) * next_values[step] + lambda_ * bootstrap
+        )
+        bootstrap = torch.where(active_step, candidate, bootstrap)
+    return bootstrap
+
+
 def select_counterfactual_actions(
     logits: Tensor,
     branching: int,

@@ -10,6 +10,8 @@ sys.path.insert(0, str(ACTOR_CRITIC_DIR))
 
 from counterfactual import (  # noqa: E402
     apply_hybrid_first_residual,
+    blend_counterfactual_advantages,
+    compute_branch_lambda_returns,
     compute_uncertainty_weights,
     normalize_tree_advantages,
     normalize_counterfactual_advantages,
@@ -97,6 +99,46 @@ class CounterfactualActorUtilsTest(unittest.TestCase):
             advantages, scale="none", clip=0.0
         )
         self.assertTrue(torch.equal(normalized, advantages))
+
+    def test_blend_counterfactual_advantages(self):
+        primary = torch.tensor([[1.0, -1.0]])
+        auxiliary = torch.tensor([[3.0, 1.0]])
+        blended = blend_counterfactual_advantages(
+            primary, auxiliary, auxiliary_weight=0.25
+        )
+        self.assertTrue(torch.equal(blended, torch.tensor([[1.5, -0.5]])))
+        self.assertTrue(torch.equal(
+            blend_counterfactual_advantages(primary, auxiliary, auxiliary_weight=0.0),
+            primary,
+        ))
+        self.assertTrue(torch.equal(
+            blend_counterfactual_advantages(primary, auxiliary, auxiliary_weight=1.0),
+            auxiliary,
+        ))
+
+    def test_compute_branch_lambda_returns(self):
+        rewards = torch.tensor([[[1.0]], [[2.0]]])
+        next_values = torch.tensor([[[10.0]], [[20.0]]])
+        dones = torch.zeros_like(rewards, dtype=torch.bool)
+        active = torch.ones_like(rewards, dtype=torch.bool)
+        full_return = compute_branch_lambda_returns(
+            rewards, next_values, dones, active, gamma=0.5, lambda_=1.0
+        )
+        td0_return = compute_branch_lambda_returns(
+            rewards, next_values, dones, active, gamma=0.5, lambda_=0.0
+        )
+        self.assertTrue(torch.equal(full_return, torch.tensor([[7.0]])))
+        self.assertTrue(torch.equal(td0_return, torch.tensor([[6.0]])))
+
+    def test_compute_branch_lambda_returns_respects_done_and_active(self):
+        rewards = torch.tensor([[[1.0]], [[100.0]]])
+        next_values = torch.tensor([[[10.0]], [[20.0]]])
+        dones = torch.tensor([[[True]], [[False]]])
+        active = torch.tensor([[[True]], [[False]]])
+        returns = compute_branch_lambda_returns(
+            rewards, next_values, dones, active, gamma=0.5, lambda_=1.0
+        )
+        self.assertTrue(torch.equal(returns, torch.tensor([[1.0]])))
 
     def test_select_counterfactual_actions_topk(self):
         logits = torch.tensor([[0.0, 3.0, 1.0, 2.0]])

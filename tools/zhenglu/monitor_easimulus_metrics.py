@@ -93,10 +93,13 @@ def print_metric(task: str, epoch: int | None, name: str, pairs: dict[str, float
             f"tree_return_std={fmt(pairs.get('actor_critic/train/imagined_treecf_branch_returns_std'))} "
             f"dr_adv={fmt(pairs.get('actor_critic/train/imagined_dr_advantages_mean'))} "
             f"dr_res={fmt(pairs.get('actor_critic/train/imagined_dr_residuals_mean'))} "
+            f"dr_model={fmt(pairs.get('actor_critic/train/imagined_dr_model_returns_mean'))} "
+            f"dr_madv={fmt(pairs.get('actor_critic/train/imagined_dr_model_advantages_mean'))} "
             f"dr_q={fmt(pairs.get('actor_critic/train/imagined_dr_q_values_mean'))} "
             f"dr_tgt={fmt(pairs.get('actor_critic/train/imagined_dr_q_targets_mean'))} "
             f"dr_w={fmt(pairs.get('actor_critic/train/imagined_dr_weights_mean'))} "
             f"dr_u={fmt(pairs.get('actor_critic/train/imagined_dr_uncertainty_mean'))} "
+            f"dr_su={fmt(pairs.get('actor_critic/train/imagined_dr_scaled_uncertainty_mean'))} "
             f"q_loss={fmt(pairs.get('actor_critic/train/imagined_loss_q'))}",
             flush=True,
         )
