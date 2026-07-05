@@ -223,6 +223,9 @@ variant_args() {
     dr_hybrid_sample_l3k6)
       echo "training.actor_critic.actor_loss_mode=doubly_robust_counterfactual training.actor_critic.dr_q_head=True training.actor_critic.batch_num_samples=${DR_HYBRID_BATCH_NUM_SAMPLES:-12} training.actor_critic.dr_branching=6 training.actor_critic.dr_rollout_horizon=3 training.actor_critic.dr_candidate_mode=sample training.actor_critic.dr_sample_temperature=1.15 training.actor_critic.dr_center=trimmed_mean training.actor_critic.dr_trim_ratio=0.25 training.actor_critic.dr_adv_scale=mad training.actor_critic.dr_uncertainty_beta=0.5 training.actor_critic.dr_q_loss_weight=0.75 training.actor_critic.dr_real_first_residual=True training.actor_critic.dr_force_replay_action=True training.actor_critic.dr_is_clip=1.5 training.actor_critic.entropy_weight=0.002"
       ;;
+    dr_mixed_l4k6)
+      echo "training.actor_critic.actor_loss_mode=doubly_robust_counterfactual training.actor_critic.dr_q_head=True training.actor_critic.batch_num_samples=${DR_MIXED_BATCH_NUM_SAMPLES:-12} training.actor_critic.dr_branching=6 training.actor_critic.dr_rollout_horizon=4 training.actor_critic.dr_candidate_mode=mixed training.actor_critic.dr_sample_temperature=1.2 training.actor_critic.dr_center=median training.actor_critic.dr_adv_scale=mad training.actor_critic.dr_uncertainty_beta=0.75 training.actor_critic.dr_q_loss_weight=0.75 training.actor_critic.dr_real_first_residual=False training.actor_critic.dr_force_replay_action=False training.actor_critic.dr_is_clip=1.5 training.actor_critic.entropy_weight=0.002"
+      ;;
     *)
       echo "[dr-launch][error] Unsupported variant '${variant}'." >&2
       exit 1

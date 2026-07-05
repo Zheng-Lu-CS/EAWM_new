@@ -131,6 +131,15 @@ class CounterfactualActorUtilsTest(unittest.TestCase):
         for row in actions:
             self.assertEqual(row.unique().numel(), row.numel())
 
+    def test_select_counterfactual_actions_mixed_keeps_top1(self):
+        torch.manual_seed(0)
+        logits = torch.tensor([[0.0, 3.0, 1.0, 2.0]])
+        actions, _, _, _, _ = select_counterfactual_actions(
+            logits, branching=3, mode="mixed", sample_temperature=1.2
+        )
+        self.assertEqual(actions[0, 0].item(), 1)
+        self.assertEqual(actions.unique().numel(), actions.numel())
+
     def test_hybrid_first_residual_only_replaces_replay_branch(self):
         model = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
         real = torch.tensor([[10.0], [20.0]])
