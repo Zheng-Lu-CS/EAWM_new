@@ -74,12 +74,12 @@ activate_conda() {
 check_inputs() {
   read -r -a TASK_ARRAY <<< "${TASKS}"
   read -r -a VARIANT_ARRAY <<< "${VARIANTS}"
-  if (( ${#TASK_ARRAY[@]} != 4 )); then
-    echo "[dr-launch][error] TASKS must contain exactly 4 Atari game names; got ${#TASK_ARRAY[@]}: ${TASKS}"
+  if (( ${#TASK_ARRAY[@]} < 1 || ${#TASK_ARRAY[@]} > 4 )); then
+    echo "[dr-launch][error] TASKS must contain 1 to 4 Atari game names; got ${#TASK_ARRAY[@]}: ${TASKS}"
     exit 1
   fi
-  if (( ${#VARIANT_ARRAY[@]} != 2 )); then
-    echo "[dr-launch][error] VARIANTS must contain exactly 2 variants; got ${#VARIANT_ARRAY[@]}: ${VARIANTS}"
+  if (( ${#VARIANT_ARRAY[@]} < 1 || ${#VARIANT_ARRAY[@]} > 2 )); then
+    echo "[dr-launch][error] VARIANTS must contain 1 or 2 variants; got ${#VARIANT_ARRAY[@]}: ${VARIANTS}"
     exit 1
   fi
   if [[ ! -d "${EASIMULUS_DIR}" ]]; then
@@ -397,7 +397,7 @@ echo "[dr-launch] collect_real_prefix=${COLLECT_REAL_PREFIX}"
 echo "[dr-launch] dry_run=${DRY_RUN}"
 
 worker_id=0
-for gpu in 0 1 2 3; do
+for gpu in "${!TASK_ARRAY[@]}"; do
   game_short="${TASK_ARRAY[$gpu]}"
   for variant in "${VARIANT_ARRAY[@]}"; do
     (
