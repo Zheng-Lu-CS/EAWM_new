@@ -11,6 +11,7 @@ VARIANTS="${VARIANTS:-dr_q_topk_l4k4 dr_hybrid_sample_l3k6}"
 SOURCE_WORLD_MODEL_OVERRIDES="${SOURCE_WORLD_MODEL_OVERRIDES:-world_model.event_pred=True world_model.ges=True}"
 FIXED_WM_SOURCE_ROOT="${FIXED_WM_SOURCE_ROOT:-${PROJECT_ROOT}/outputs}"
 ALLOW_BROAD_SOURCE_SEARCH="${ALLOW_BROAD_SOURCE_SEARCH:-0}"
+ALLOW_GAME_PATH_SOURCE_MATCH="${ALLOW_GAME_PATH_SOURCE_MATCH:-0}"
 LAUNCH_STAGGER_SECONDS="${LAUNCH_STAGGER_SECONDS:-10}"
 AUTO_RESUME="${AUTO_RESUME:-1}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-10}"
@@ -105,6 +106,7 @@ is_valid_source_run_dir() {
   local run_dir="$1"
   [[ -f "${run_dir}/checkpoints/last.pt" ]] || return 1
   [[ -d "${run_dir}/checkpoints/dataset" ]] || return 1
+  find "${run_dir}/checkpoints/dataset" -maxdepth 1 -type f -name '*.pt' -print -quit 2>/dev/null | grep -q . || return 1
   return 0
 }
 
@@ -114,6 +116,7 @@ is_valid_actor_run_dir() {
   [[ -f "${run_dir}/checkpoints/last.pt" ]] || return 1
   [[ -f "${run_dir}/checkpoints/optimizer.pt" ]] || return 1
   [[ -d "${run_dir}/checkpoints/dataset" ]] || return 1
+  find "${run_dir}/checkpoints/dataset" -maxdepth 1 -type f -name '*.pt' -print -quit 2>/dev/null | grep -q . || return 1
   return 0
 }
 
@@ -159,6 +162,7 @@ source_override_var_name() {
 find_source_run_dir() {
   local game_short="$1"
   local game="${game_short}NoFrameskip-v4"
+  local exact_seed_segment="/${game_short}_seed${SEED}/"
   local line ckpt run_dir search_root override_var override_value
 
   override_var="$(source_override_var_name "${game_short}")"
@@ -178,7 +182,12 @@ find_source_run_dir() {
     [[ "${run_dir}" == *"/treecf_actor_atari_"* ]] && continue
     [[ "${run_dir}" == *"/dr_actor_atari_"* ]] && continue
     [[ "${run_dir}" == *"/fixedwm_actor_atari_"* ]] && continue
-    if [[ "${ckpt}" != *"/${game_short}_seed${SEED}/"* && "${ckpt}" != *"/${game}/"* ]]; then
+    if [[ "${ckpt}" != *"${exact_seed_segment}"* ]]; then
+      if [[ "${ALLOW_GAME_PATH_SOURCE_MATCH}" != "1" || "${ckpt}" != *"/${game}/"* ]]; then
+        continue
+      fi
+    fi
+    if [[ "${ckpt}" == *"/${game_short}_"*"_seed${SEED}/"* && "${ckpt}" != *"${exact_seed_segment}"* ]]; then
       continue
     fi
     if is_valid_source_run_dir "${run_dir}"; then
@@ -382,6 +391,7 @@ echo "[dr-launch] log_root=${LOG_ROOT}"
 echo "[dr-launch] source_root=${FIXED_WM_SOURCE_ROOT}"
 echo "[dr-launch] source_output_prefix=${SOURCE_OUTPUT_PREFIX}"
 echo "[dr-launch] allow_broad_source_search=${ALLOW_BROAD_SOURCE_SEARCH}"
+echo "[dr-launch] allow_game_path_source_match=${ALLOW_GAME_PATH_SOURCE_MATCH}"
 echo "[dr-launch] resume_output_prefix=${RESUME_OUTPUT_PREFIX}"
 echo "[dr-launch] collect_real_prefix=${COLLECT_REAL_PREFIX}"
 echo "[dr-launch] dry_run=${DRY_RUN}"

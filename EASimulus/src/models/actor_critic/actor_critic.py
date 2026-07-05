@@ -722,7 +722,8 @@ class ActorCriticLS(nn.Module):
                     else anchor_index + 1
                 )
                 real_next_obs = {
-                    k: v[:, real_next_index] for k, v in batch["observations"].items()
+                    k: v[:, real_next_index : real_next_index + 1]
+                    for k, v in batch["observations"].items()
                 }
                 real_next_tokens = world_model.get_obs_tokens(
                     real_next_obs, tokenizer=tokenizer
