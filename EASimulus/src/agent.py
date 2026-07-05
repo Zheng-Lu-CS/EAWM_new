@@ -66,9 +66,13 @@ class Agent(nn.Module):
         incoming_state_dict: dict,
         module_name: str,
         path_to_checkpoint: Path,
+        strict: bool = True,
     ) -> None:
         try:
-            module.load_state_dict(incoming_state_dict)
+            incompatible = module.load_state_dict(
+                incoming_state_dict,
+                strict=strict,
+            )
         except RuntimeError:
             logger.error(
                 f"Failed to load {module_name} from checkpoint: {path_to_checkpoint}"
@@ -78,8 +82,23 @@ class Agent(nn.Module):
             ):
                 logger.error(line)
             raise
+        if not strict:
+            missing = getattr(incompatible, "missing_keys", [])
+            unexpected = getattr(incompatible, "unexpected_keys", [])
+            logger.warning(
+                f"Loaded {module_name} from checkpoint with strict=False: "
+                f"missing={missing}, unexpected={unexpected}"
+            )
 
-    def load(self, path_to_checkpoint: Path, device: torch.device, load_tokenizer: bool = True, load_world_model: bool = True, load_actor_critic: bool = True) -> None:
+    def load(
+        self,
+        path_to_checkpoint: Path,
+        device: torch.device,
+        load_tokenizer: bool = True,
+        load_world_model: bool = True,
+        load_actor_critic: bool = True,
+        actor_critic_strict: bool = True,
+    ) -> None:
         agent_state_dict = torch.load(path_to_checkpoint, map_location=device, weights_only=True)
         if load_tokenizer:
             self._load_module_state_dict(
@@ -101,6 +120,7 @@ class Agent(nn.Module):
                 extract_state_dict(agent_state_dict, 'actor_critic'),
                 'actor_critic',
                 path_to_checkpoint,
+                strict=actor_critic_strict,
             )
 
     def act(self, obs: MultiModalObs, should_sample: bool = True, temperature: float = 1.0) ->Tensor:

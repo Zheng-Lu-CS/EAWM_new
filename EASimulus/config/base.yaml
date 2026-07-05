@@ -30,6 +30,7 @@ initialization:
     load_tokenizer: False
     load_world_model: False
     load_actor_critic: False
+    actor_critic_strict: True
   video:
     path: null
   dataset:
